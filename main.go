@@ -4,8 +4,7 @@ import (
 	"log"
 	"net"
 
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/publisher"
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/subscriber"
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/fspubsub"
 
 	pubsub "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc"
@@ -18,7 +17,8 @@ func main() {
 	}
 	var opts []grpc.ServerOption
 	grpcServer := grpc.NewServer(opts...)
-	pubsub.RegisterPublisherServer(grpcServer, &publisher.PublisherServer{})
-	pubsub.RegisterSubscriberServer(grpcServer, &subscriber.SubscriberServer{})
+	mypub := fspubsub.NewFSPubSubServer("/tmp/pubsub")
+	pubsub.RegisterPublisherServer(grpcServer, mypub)
+	pubsub.RegisterSubscriberServer(grpcServer, mypub)
 	grpcServer.Serve(lis)
 }
