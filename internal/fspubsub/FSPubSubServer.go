@@ -353,11 +353,10 @@ func (fspss *FSPubSubServer) StreamingPull(pullServer pubsub.Subscriber_Streamin
 	if sub == nil {
 		return status.Error(codes.NotFound, "Subscription not found")
 	}
-
-	// for {
-
-	// }
-	return status.Errorf(codes.Unimplemented, "method StreamingPull not implemented")
+	ss := sub.CreateStreamingSubscription(pullRequest, pullServer)
+	ss.Run()
+	sub.DeleteStreamingSubscription(ss)
+	return err
 }
 func (ss *FSPubSubServer) ModifyPushConfig(context.Context, *pubsub.ModifyPushConfigRequest) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ModifyPushConfig not implemented")
