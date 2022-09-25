@@ -269,6 +269,7 @@ func (fspss *FSPubSubServer) DeleteSubscription(ctx context.Context, dsr *pubsub
 	return nil, nil
 }
 func (fspss *FSPubSubServer) ModifyAckDeadline(ctx context.Context, madr *pubsub.ModifyAckDeadlineRequest) (*emptypb.Empty, error) {
+	logger.Info("ModifyAckDeadline")
 	pjName, err := GetProjectName(madr.Subscription)
 	if err != nil {
 		return nil, err
@@ -286,9 +287,10 @@ func (fspss *FSPubSubServer) ModifyAckDeadline(ctx context.Context, madr *pubsub
 		return nil, status.Error(codes.NotFound, "Subscription not found")
 	}
 	sub.UpdateAcks(madr.AckIds, madr.AckDeadlineSeconds)
-	return nil, nil
+	return &emptypb.Empty{}, nil
 }
 func (fspss *FSPubSubServer) Acknowledge(ctx context.Context, ar *pubsub.AcknowledgeRequest) (*emptypb.Empty, error) {
+	logger.Info("Acknowledge")
 	pjName, err := GetProjectName(ar.Subscription)
 	if err != nil {
 		return nil, err
@@ -306,9 +308,10 @@ func (fspss *FSPubSubServer) Acknowledge(ctx context.Context, ar *pubsub.Acknowl
 		return nil, status.Error(codes.NotFound, "Subscription not found")
 	}
 	sub.AckMessages(ar.AckIds)
-	return nil, nil
+	return &emptypb.Empty{}, nil
 }
 func (fspss *FSPubSubServer) Pull(ctx context.Context, pr *pubsub.PullRequest) (*pubsub.PullResponse, error) {
+	logger.Info("Pull")
 	pjName, err := GetProjectName(pr.Subscription)
 	if err != nil {
 		return nil, err
@@ -329,7 +332,31 @@ func (fspss *FSPubSubServer) Pull(ctx context.Context, pr *pubsub.PullRequest) (
 	return &pubsub.PullResponse{ReceivedMessages: msgs}, nil
 }
 
-func (ss *FSPubSubServer) StreamingPull(pubsub.Subscriber_StreamingPullServer) error {
+func (fspss *FSPubSubServer) StreamingPull(pullServer pubsub.Subscriber_StreamingPullServer) error {
+	pullRequest, err := pullServer.Recv()
+	if err != nil {
+		return err
+	}
+	pjName, err := GetProjectName(pullRequest.Subscription)
+	if err != nil {
+		return err
+	}
+	subName, err := GetSubscriptionName(pullRequest.Subscription)
+	if err != nil {
+		return err
+	}
+	fsProject := fspss.GetProject(pjName)
+	if fsProject == nil {
+		return status.Error(codes.NotFound, "Invalid project")
+	}
+	sub := fsProject.GetSubscription(subName)
+	if sub == nil {
+		return status.Error(codes.NotFound, "Subscription not found")
+	}
+
+	// for {
+
+	// }
 	return status.Errorf(codes.Unimplemented, "method StreamingPull not implemented")
 }
 func (ss *FSPubSubServer) ModifyPushConfig(context.Context, *pubsub.ModifyPushConfigRequest) (*emptypb.Empty, error) {

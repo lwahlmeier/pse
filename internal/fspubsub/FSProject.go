@@ -12,11 +12,10 @@ import (
 )
 
 type FSProject struct {
-	Name          string
-	Topics        map[string]*FSTopic
-	Subscriptions map[string]*FSSubscriptions
-	ProjectPath   string
-	projectLock   sync.Mutex
+	Name        string
+	Topics      map[string]*FSTopic
+	ProjectPath string
+	lock        sync.Mutex
 }
 
 func CreateProject(name, basePath string) (*FSProject, error) {
@@ -33,15 +32,15 @@ func CreateProject(name, basePath string) (*FSProject, error) {
 		return nil, err
 	}
 	return &FSProject{
-		Name:          name,
-		ProjectPath:   projectPath,
-		Topics:        make(map[string]*FSTopic),
-		Subscriptions: make(map[string]*FSSubscriptions),
+		Name:        name,
+		ProjectPath: projectPath,
+		Topics:      make(map[string]*FSTopic),
 	}, nil
 
 }
 
 func LoadProject(name, basePath string) (*FSProject, error) {
+	logger.Info("Loading project:{}", name)
 	projectPath := path.Join(basePath, name)
 	stat, err := os.Stat(projectPath)
 	if err != nil {
@@ -51,11 +50,11 @@ func LoadProject(name, basePath string) (*FSProject, error) {
 		return nil, status.Error(codes.Internal, "Can not create project")
 	}
 	pj := &FSProject{
-		ProjectPath:   projectPath,
-		Name:          name,
-		Topics:        make(map[string]*FSTopic),
-		Subscriptions: make(map[string]*FSSubscriptions),
+		ProjectPath: projectPath,
+		Name:        name,
+		Topics:      make(map[string]*FSTopic),
 	}
+	pj.loadTopics()
 	return pj, nil
 	// pjt.projectLock.Lock()
 	// defer pjt.projectLock.Unlock()
@@ -107,9 +106,33 @@ func LoadProject(name, basePath string) (*FSProject, error) {
 	// }
 }
 
+func (fsp *FSProject) loadTopics() error {
+	fsil, err := os.ReadDir(fsp.ProjectPath)
+	if err != nil {
+		return err
+	}
+	fsTopics := make([]*FSTopic, 0)
+	for _, fsi := range fsil {
+		if !fsi.IsDir() {
+			continue
+		}
+		fsTopic, err := LoadTopic(fsi.Name(), fsp)
+		if err != nil {
+			continue
+		}
+		fsTopics = append(fsTopics, fsTopic)
+	}
+	fsp.lock.Lock()
+	defer fsp.lock.Unlock()
+	for _, fsTopic := range fsTopics {
+		fsp.Topics[fsTopic.name] = fsTopic
+	}
+	return nil
+}
+
 func (pjt *FSProject) GetTopic(topicName string) *FSTopic {
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	return pjt.Topics[topicName]
 }
 
@@ -118,8 +141,8 @@ func (pjt *FSProject) AddTopic(topic *pubsub.Topic) error {
 	if err != nil {
 		return err
 	}
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	if _, ok := pjt.Topics[tn]; ok {
 		return status.Error(codes.AlreadyExists, "Topic Already Exists")
 	}
@@ -132,8 +155,8 @@ func (pjt *FSProject) AddTopic(topic *pubsub.Topic) error {
 }
 
 func (pjt *FSProject) RemoveTopic(topicName string) {
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	delete(pjt.Topics, topicName)
 }
 
@@ -159,9 +182,8 @@ func (pjt *FSProject) AddSub(sub *pubsub.Subscription) error {
 }
 
 func (pjt *FSProject) GetSubscription(subName string) *FSSubscriptions {
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
-	return pjt.Subscriptions[subName]
+	subs := pjt.GetFSSubs()
+	return subs[subName]
 }
 
 func (pjt *FSProject) DeleteSubscription(subName string) error {
@@ -169,16 +191,15 @@ func (pjt *FSProject) DeleteSubscription(subName string) error {
 	if fsSub == nil {
 		return status.Error(codes.NotFound, "No such Subject Exists")
 	}
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	fsSub.Delete()
-	delete(pjt.Subscriptions, subName)
 	return nil
 }
 
 func (pjt *FSProject) GetAllTopics() []*pubsub.Topic {
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	topics := make([]*pubsub.Topic, 0)
 	for _, topic := range pjt.Topics {
 		topics = append(topics, topic.pubsubTopic)
@@ -186,12 +207,28 @@ func (pjt *FSProject) GetAllTopics() []*pubsub.Topic {
 	return topics
 }
 
+func (pjt *FSProject) GetFSSubs() map[string]*FSSubscriptions {
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
+	subs := make(map[string]*FSSubscriptions)
+	for _, fsTopic := range pjt.Topics {
+		logger.Info("Topic:{}", fsTopic.name)
+		for _, fsSub := range fsTopic.GetAllSubscriptions() {
+			subs[fsSub.name] = fsSub
+			logger.Info("Subject:{}", fsSub.name)
+		}
+	}
+	return subs
+}
+
 func (pjt *FSProject) GetAllSubscription() []*pubsub.Subscription {
-	pjt.projectLock.Lock()
-	defer pjt.projectLock.Unlock()
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
 	subs := make([]*pubsub.Subscription, 0)
-	for _, sub := range pjt.Subscriptions {
-		subs = append(subs, sub.pubsubSubscription)
+	for _, fsTopic := range pjt.Topics {
+		for _, fsSub := range fsTopic.GetAllSubscriptions() {
+			subs = append(subs, fsSub.pubsubSubscription)
+		}
 	}
 	return subs
 }

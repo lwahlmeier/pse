@@ -59,7 +59,8 @@ func CreateFSTopic(project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
 	return fst, nil
 }
 
-func LoadTopic(project *FSProject, topicName string) (*FSTopic, error) {
+func LoadTopic(topicName string, project *FSProject) (*FSTopic, error) {
+	logger.Info("Project:{} Loading Topic:{}", project.Name, topicName)
 	basePath := path.Join(project.ProjectPath, topicName)
 	fst := &FSTopic{
 		project:   project,
@@ -83,7 +84,32 @@ func LoadTopic(project *FSProject, topicName string) (*FSTopic, error) {
 		return nil, err
 	}
 	fst.pubsubTopic = topic
+	fst.loadSubs()
 	return fst, nil
+}
+
+func (fst *FSTopic) loadSubs() error {
+	fsil, err := os.ReadDir(fst.topicPath)
+	if err != nil {
+		return err
+	}
+	fsSubs := make([]*FSSubscriptions, 0)
+	for _, fsi := range fsil {
+		if !fsi.IsDir() {
+			continue
+		}
+		fsSub, err := LoadSubscription(fsi.Name(), fst)
+		if err != nil {
+			continue
+		}
+		fsSubs = append(fsSubs, fsSub)
+	}
+	fst.lock.Lock()
+	defer fst.lock.Unlock()
+	for _, fsSub := range fsSubs {
+		fst.subs[fsSub.name] = fsSub
+	}
+	return nil
 }
 
 func (fst *FSTopic) Delete() {
@@ -101,6 +127,20 @@ func (fst *FSTopic) GetPubSubTopic() *pubsub.Topic {
 }
 
 func (fst *FSTopic) AddSub(sub *pubsub.Subscription) error {
+	subName, err := GetSubscriptionName(sub.Name)
+	if err != nil {
+		return err
+	}
+	fst.lock.Lock()
+	defer fst.lock.Unlock()
+	if _, ok := fst.subs[subName]; ok {
+		return status.Error(codes.AlreadyExists, "Sub Already Exists")
+	}
+	fsSub, err := CreateSubscription(fst.topicPath, fst, sub)
+	if err != nil {
+		return err
+	}
+	fst.subs[subName] = fsSub
 	return nil
 }
 
@@ -115,9 +155,18 @@ func (fst *FSTopic) GetSubscription(subName string) *FSSubscriptions {
 }
 
 func (fst *FSTopic) GetAllSubscriptions() []*FSSubscriptions {
-	return nil
+	fsSubs := make([]*FSSubscriptions, 0)
+	for _, fsSub := range fst.subs {
+		fsSubs = append(fsSubs, fsSub)
+	}
+	return fsSubs
 }
 
 func (fst *FSTopic) Publish(msg *pubsub.PubsubMessage) error {
+	fst.lock.Lock()
+	defer fst.lock.Unlock()
+	for _, fsSub := range fst.subs {
+		fsSub.Publish(msg)
+	}
 	return nil
 }

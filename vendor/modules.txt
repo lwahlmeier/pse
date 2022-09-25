@@ -22,6 +22,11 @@ github.com/cornelk/hashmap
 # github.com/dchest/siphash v1.1.0
 ## explicit
 github.com/dchest/siphash
+# github.com/fsnotify/fsnotify v1.5.4
+## explicit; go 1.16
+github.com/fsnotify/fsnotify
+# github.com/go-fsnotify/fsnotify v0.0.0-20180321022601-755488143dae
+## explicit
 # github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
 ## explicit
 github.com/golang/groupcache/lru

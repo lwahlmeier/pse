@@ -160,3 +160,20 @@ func GetAllSubsForTopic(basePath string, topic *pubsub.Topic) []*pubsub.Subscrip
 	}
 	return tsubs
 }
+
+func ReadMessage(path string) (*pubsub.PubsubMessage, error) {
+	fp, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := ioutil.ReadAll(fp)
+	if err != nil {
+		return nil, err
+	}
+	msg := &pubsub.PubsubMessage{}
+	err = proto.Unmarshal(data, msg)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
