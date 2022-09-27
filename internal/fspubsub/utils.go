@@ -1,6 +1,7 @@
 package fspubsub
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -169,6 +170,9 @@ func ReadMessage(path string) (*pubsub.PubsubMessage, error) {
 	data, err := ioutil.ReadAll(fp)
 	if err != nil {
 		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, errors.New("Data Missing")
 	}
 	msg := &pubsub.PubsubMessage{}
 	err = proto.Unmarshal(data, msg)

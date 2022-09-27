@@ -1,0 +1,302 @@
+package mempubsub
+
+import (
+	"sync"
+	"time"
+
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/utils"
+	"github.com/google/uuid"
+	"google.golang.org/genproto/googleapis/pubsub/v1"
+)
+
+type MsgTime struct {
+	msg     *pubsub.ReceivedMessage
+	expTime time.Time
+}
+
+func NewMsgTime(msg *pubsub.ReceivedMessage, expDeadline time.Duration) *MsgTime {
+	return &MsgTime{
+		msg:     msg,
+		expTime: time.Now().Add(expDeadline),
+	}
+}
+
+func (mt *MsgTime) ExtendTime(newDeadLine time.Duration) {
+	mt.expTime = time.Now().Add(newDeadLine)
+}
+
+func (mt *MsgTime) IsExpired() bool {
+	return time.Until(mt.expTime) < 0
+}
+
+type MemSubscription struct {
+	name          string
+	topic         *MemTopic
+	sub           *pubsub.Subscription
+	acks          map[uuid.UUID]*MsgTime
+	ackLock       sync.Mutex
+	msgChannel    *utils.DynamicMsgChannel
+	running       bool
+	streamClients map[string]*StreamingSubcription
+	clientLock    sync.Mutex
+}
+
+func NewMemSub(name string, topic *MemTopic, sub *pubsub.Subscription) *MemSubscription {
+	ms := &MemSubscription{
+		name:          name,
+		topic:         topic,
+		sub:           sub,
+		msgChannel:    utils.NewDynamicMsgChannel(),
+		acks:          make(map[uuid.UUID]*MsgTime),
+		streamClients: make(map[string]*StreamingSubcription),
+		running:       true,
+	}
+	go ms.watcher()
+	return ms
+}
+
+func (ms *MemSubscription) GetTopic() base.BaseTopic {
+	return ms.topic
+}
+func (ms *MemSubscription) GetName() string {
+	return ms.name
+}
+func (ms *MemSubscription) GetSubscriptionPubSub() *pubsub.Subscription {
+	return ms.sub
+}
+func (ms *MemSubscription) UpdateAcks(acks []string, secs int32) {
+	ms.ackLock.Lock()
+	defer ms.ackLock.Unlock()
+	addTime := time.Second * time.Duration(secs)
+	for _, ack := range acks {
+		uack := uuid.MustParse(ack)
+		if mt, ok := ms.acks[uack]; ok {
+			mt.ExtendTime(addTime)
+		}
+	}
+}
+func (ms *MemSubscription) UpdateAck(ack string, addTime time.Duration) {
+	ms.ackLock.Lock()
+	defer ms.ackLock.Unlock()
+	uack := uuid.MustParse(ack)
+	if mt, ok := ms.acks[uack]; ok {
+		mt.ExtendTime(addTime)
+	}
+}
+
+func (ms *MemSubscription) AckMessages(acks []string) {
+	ms.ackLock.Lock()
+	defer ms.ackLock.Unlock()
+	for _, ack := range acks {
+		uack := uuid.MustParse(ack)
+		delete(ms.acks, uack)
+		ms.runAck(uack)
+	}
+}
+
+func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*pubsub.ReceivedMessage {
+	msgs := make([]*pubsub.ReceivedMessage, 0)
+	timer := time.NewTimer(maxWait)
+	select {
+	case msg := <-ms.msgChannel.Get():
+		msgs = append(msgs, msg)
+		ms.watchMesageAck(msg, ms.sub.MessageRetentionDuration.AsDuration())
+	loop:
+		for len(msgs) < int(maxMsgs) {
+			select {
+			case msg := <-ms.msgChannel.Get():
+				msgs = append(msgs, msg)
+				ms.watchMesageAck(msg, ms.sub.MessageRetentionDuration.AsDuration())
+			default:
+				break loop
+			}
+		}
+	case <-timer.C:
+	}
+	if !timer.Stop() {
+		<-timer.C
+	}
+	return msgs
+}
+func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
+	cid := uuid.NewString()
+	logger.Info("Creating SubStream:{}", cid)
+	ss := &StreamingSubcription{
+		sub:             ms,
+		streamingServer: streamingServer,
+		clientId:        cid,
+		maxMsgs:         firstRecvMsg.MaxOutstandingMessages,
+		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
+		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
+		running:         true,
+		acker:           utils.NewDynamicUUIDChannel(),
+		pendingMsgs:     make(map[uuid.UUID]bool),
+	}
+	ms.clientLock.Lock()
+	defer ms.clientLock.Unlock()
+	ms.streamClients[cid] = ss
+	go ss.watchRecv()
+
+	return ss
+}
+
+func (ms *MemSubscription) DeleteStreamingSubscription(ss *StreamingSubcription) {
+	ms.clientLock.Lock()
+	defer ms.clientLock.Unlock()
+	delete(ms.streamClients, ss.clientId)
+}
+
+func (ms *MemSubscription) stop() {
+	ms.running = false
+}
+
+func (ms *MemSubscription) watcher() {
+	ack_check_time := time.Second * 5
+	timer := time.NewTimer(ack_check_time)
+	for ms.running {
+		<-timer.C
+		ms.checkNack()
+		timer.Reset(ack_check_time)
+	}
+}
+
+func (ms *MemSubscription) checkNack() {
+	logger.Info("Checking Nack")
+	ms.ackLock.Lock()
+	defer ms.ackLock.Unlock()
+	for mid, mt := range ms.acks {
+		if mt.IsExpired() {
+			logger.Info("Nacking Message:{}", mid.String())
+			delete(ms.acks, mid)
+			ms.runAck(mid)
+			mt.msg.DeliveryAttempt++
+			ms.msgChannel.Add() <- mt.msg
+		}
+	}
+}
+
+func (ms *MemSubscription) runAck(ackUUID uuid.UUID) {
+	ms.clientLock.Lock()
+	defer ms.clientLock.Unlock()
+	for _, client := range ms.streamClients {
+		client.acker.Add() <- ackUUID
+	}
+}
+
+func (ms *MemSubscription) PublishMessage(msg *pubsub.PubsubMessage) {
+	ms.msgChannel.Add() <- &pubsub.ReceivedMessage{
+		Message:         msg,
+		AckId:           msg.MessageId,
+		DeliveryAttempt: 0,
+	}
+}
+
+func (ms *MemSubscription) watchMesageAck(msg *pubsub.ReceivedMessage, deadline time.Duration) {
+	ms.ackLock.Lock()
+	defer ms.ackLock.Unlock()
+	ms.acks[uuid.MustParse(msg.AckId)] = &MsgTime{
+		msg:     msg,
+		expTime: time.Now().Add(deadline),
+	}
+}
+
+type StreamingSubcription struct {
+	streamingServer pubsub.Subscriber_StreamingPullServer
+	sub             *MemSubscription
+	maxMsgs         int64
+	maxBytes        int64
+	pendingMsgs     map[uuid.UUID]bool
+	acker           *utils.DynamicUUIDChannel
+	currentBytes    int64
+	clientId        string
+	deadline        time.Duration
+	recvChan        chan *pubsub.StreamingPullRequest
+	running         bool
+}
+
+func (ss *StreamingSubcription) Run() {
+	defer ss.sub.DeleteStreamingSubscription(ss)
+	for ss.running {
+		if int64(len(ss.pendingMsgs)) >= ss.maxMsgs {
+			ss.noMsgSelect()
+			continue
+		}
+		msgs := ss.msgSelect()
+		if len(msgs) > 0 {
+			err := ss.streamingServer.Send(&pubsub.StreamingPullResponse{
+				ReceivedMessages: msgs,
+			})
+			if err != nil {
+				logger.Warn("Error StreamSending Message:{}", err.Error())
+				ss.running = false
+				return
+			}
+		}
+	}
+}
+
+func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
+	msgs := make([]*pubsub.ReceivedMessage, 0)
+	select {
+	case msg := <-ss.sub.msgChannel.Get():
+		logger.Info("Sending Message:{}", msg)
+		ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
+		ss.sub.watchMesageAck(msg, ss.deadline)
+		msgs = append(msgs, msg)
+		for len(msgs)+len(ss.pendingMsgs) < int(ss.maxMsgs) {
+			select {
+			case msg := <-ss.sub.msgChannel.Get():
+				ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
+				ss.sub.watchMesageAck(msg, ss.deadline)
+				msgs = append(msgs, msg)
+			default:
+				return msgs
+			}
+		}
+	case aid := <-ss.acker.Get():
+		delete(ss.pendingMsgs, aid)
+	case recvMsg := <-ss.recvChan:
+		if len(recvMsg.AckIds) > 0 {
+			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
+			ss.sub.AckMessages(recvMsg.AckIds)
+		}
+		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
+			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
+			for i := range recvMsg.ModifyDeadlineAckIds {
+				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
+			}
+		}
+	}
+	return msgs
+}
+func (ss *StreamingSubcription) noMsgSelect() {
+	select {
+	case aid := <-ss.acker.Get():
+		delete(ss.pendingMsgs, aid)
+	case recvMsg := <-ss.recvChan:
+		if len(recvMsg.AckIds) > 0 {
+			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
+			ss.sub.AckMessages(recvMsg.AckIds)
+		}
+		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
+			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
+			for i := range recvMsg.ModifyDeadlineAckIds {
+				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
+			}
+		}
+	}
+}
+
+func (ss *StreamingSubcription) watchRecv() {
+	for ss.running {
+		msg, err := ss.streamingServer.Recv()
+		logger.Info("{}: WatchRecv: {}", ss.clientId, msg)
+		if !ss.running || err != nil {
+			logger.Warn("Error StreamRecv:{}", err.Error())
+			ss.running = false
+			return
+		}
+		ss.recvChan <- msg
+	}
+}

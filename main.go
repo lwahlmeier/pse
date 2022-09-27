@@ -4,12 +4,11 @@ import (
 	"log"
 	"net"
 
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/fspubsub"
-
 	pubsub "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc"
 )
 
+//TODO: add arg parsing
 func main() {
 	lis, err := net.Listen("tcp", "localhost:8681")
 	if err != nil {
@@ -17,7 +16,8 @@ func main() {
 	}
 	var opts []grpc.ServerOption
 	grpcServer := grpc.NewServer(opts...)
-	mypub := fspubsub.NewFSPubSubServer("/tmp/pubsub")
+	mypub, err := NewFileSystemPubSubEmulator("/tmp/pubsub2")
+	// mypub := NewMemoryPubSubEmulator()
 	pubsub.RegisterPublisherServer(grpcServer, mypub)
 	pubsub.RegisterSubscriberServer(grpcServer, mypub)
 	grpcServer.Serve(lis)

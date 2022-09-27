@@ -8,6 +8,7 @@ import (
 	"path"
 	"sync"
 
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,7 +29,7 @@ func CreateFSTopic(project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
 	if err != nil {
 		return nil, err
 	}
-	basePath := path.Join(project.ProjectPath, topicName)
+	basePath := path.Join(project.projectPath, topicName)
 	_, err = os.Stat(basePath)
 	if err == nil {
 		return nil, status.Error(codes.AlreadyExists, "Topic Already Exists")
@@ -59,9 +60,9 @@ func CreateFSTopic(project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
 	return fst, nil
 }
 
-func LoadTopic(topicName string, project *FSProject) (*FSTopic, error) {
-	logger.Info("Project:{} Loading Topic:{}", project.Name, topicName)
-	basePath := path.Join(project.ProjectPath, topicName)
+func LoadFSTopic(topicName string, project *FSProject) (*FSTopic, error) {
+	logger.Info("Project:{} Loading Topic:{}", project.name, topicName)
+	basePath := path.Join(project.projectPath, topicName)
 	fst := &FSTopic{
 		project:   project,
 		name:      topicName,
@@ -113,20 +114,28 @@ func (fst *FSTopic) loadSubs() error {
 }
 
 func (fst *FSTopic) Delete() {
-	logger.Info("Project:{}:Topic:{}, Deleteing", fst.project.Name, fst.name)
+	logger.Info("Project:{}:Topic:{}, Deleteing", fst.project.name, fst.name)
 	os.RemoveAll(fst.topicPath)
-	fst.project.RemoveTopic(fst.name)
+	fst.project.DeleteTopic(fst.name)
 }
 
 func (fst *FSTopic) GetTopicFilePath() string {
 	return path.Join(fst.topicPath, fmt.Sprintf("%s.topic.proto", fst.name))
 }
 
-func (fst *FSTopic) GetPubSubTopic() *pubsub.Topic {
+func (fst *FSTopic) GetTopicPubSub() *pubsub.Topic {
 	return fst.pubsubTopic
 }
 
-func (fst *FSTopic) AddSub(sub *pubsub.Subscription) error {
+func (fst *FSTopic) GetProject() base.BaseProject {
+	return fst.project
+}
+
+func (fst *FSTopic) GetName() string {
+	return fst.name
+}
+
+func (fst *FSTopic) CreateSub(sub *pubsub.Subscription) error {
 	subName, err := GetSubscriptionName(sub.Name)
 	if err != nil {
 		return err
@@ -144,25 +153,30 @@ func (fst *FSTopic) AddSub(sub *pubsub.Subscription) error {
 	return nil
 }
 
-func (fst *FSTopic) RemoveSub(subName string) {
+func (fst *FSTopic) GetSub(subName string) base.BaseSubscription {
+	fst.lock.Lock()
+	defer fst.lock.Unlock()
+	if sub, ok := fst.subs[subName]; ok {
+		return sub
+	}
+	return nil
+}
+
+func (fst *FSTopic) DeleteSub(subName string) {
 	fst.lock.Lock()
 	defer fst.lock.Unlock()
 	delete(fst.subs, subName)
 }
 
-func (fst *FSTopic) GetSubscription(subName string) *FSSubscriptions {
-	return nil
-}
-
-func (fst *FSTopic) GetAllSubscriptions() []*FSSubscriptions {
-	fsSubs := make([]*FSSubscriptions, 0)
+func (fst *FSTopic) GetAllSubs() []base.BaseSubscription {
+	fsSubs := make([]base.BaseSubscription, 0)
 	for _, fsSub := range fst.subs {
 		fsSubs = append(fsSubs, fsSub)
 	}
 	return fsSubs
 }
 
-func (fst *FSTopic) Publish(msg *pubsub.PubsubMessage) error {
+func (fst *FSTopic) PublishMessage(msg *pubsub.PubsubMessage) error {
 	fst.lock.Lock()
 	defer fst.lock.Unlock()
 	for _, fsSub := range fst.subs {

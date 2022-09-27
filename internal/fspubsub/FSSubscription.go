@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math"
 	"os"
 	"path"
 	"strings"
 	"sync"
 	"time"
 
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/utils"
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
@@ -20,6 +21,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+//TODO: This can probably be simplified to using a single select loop for
+//managing messages and acks through channel -> disk -> notify
+//possibly better then using inotify
 type FSSubscriptions struct {
 	name               string
 	topic              *FSTopic
@@ -72,7 +76,7 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 }
 
 func LoadSubscription(subName string, topic *FSTopic) (*FSSubscriptions, error) {
-	logger.Info("Project:{}:Topic:{} loading Sub:{}", topic.project.Name, topic.name, subName)
+	logger.Info("Project:{}:Topic:{} loading Sub:{}", topic.project.name, topic.name, subName)
 	subPath := path.Join(topic.topicPath, subName)
 	fsSub := &FSSubscriptions{
 		name:          subName,
@@ -137,28 +141,44 @@ func (fss *FSSubscriptions) watchMessages() {
 
 }
 
+func (fss *FSSubscriptions) GetTopic() base.BaseTopic {
+	return fss.topic
+}
+
+func (fss *FSSubscriptions) GetName() string {
+	return fss.name
+}
+
 func (fss *FSSubscriptions) GetSubFilePath() string {
 	return path.Join(fss.subPath, fmt.Sprintf("%s.sub.proto", fss.name))
 }
 
-func (fss *FSSubscriptions) GetPubSubSubscription() *pubsub.Subscription {
+func (fss *FSSubscriptions) GetSubscriptionPubSub() *pubsub.Subscription {
 	return fss.pubsubSubscription
 }
 
 func (fss *FSSubscriptions) Publish(msg *pubsub.PubsubMessage) {
 	data, _ := proto.Marshal(msg)
+	tmpPath := path.Join(fss.subPath, fmt.Sprintf("%s.tmp-msg.proto", msg.MessageId))
 	msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.msg.proto", msg.MessageId))
-	ioutil.WriteFile(msgPath, data, os.ModePerm)
+	ioutil.WriteFile(tmpPath, data, os.ModePerm)
+	// We Rename to keep from sending notify too soon before we write data
+	os.Rename(tmpPath, msgPath)
 }
 
 func (fss *FSSubscriptions) UpdateAcks(ackIds []string, deadline int32) {
-	setDeadline := math.Max(0, float64(deadline))
-	setDeadline = math.Min(600, float64(setDeadline))
-	ackTill := time.Now().Add(time.Second * time.Duration(setDeadline))
+	doTime := time.Second * time.Duration(deadline)
+	if doTime < time.Second {
+		doTime = time.Duration(0)
+	} else if doTime > base.MAX_ACK_TIME {
+		doTime = base.MAX_ACK_TIME
+	}
+	ackTill := time.Now().Add(doTime)
 	fss.ackLock.Lock()
 	defer fss.ackLock.Unlock()
+	// We do this here to save multipule locks if we do UpdateAck
 	for _, mid := range ackIds {
-		logger.Info("Updating Ack for Message:{} extending {}s", mid, int(setDeadline))
+		logger.Info("Updating Ack for Message:{} extending {}", mid, doTime)
 		msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", mid))
 		_, err := os.Stat(msgPath)
 		if err != nil {
@@ -166,6 +186,26 @@ func (fss *FSSubscriptions) UpdateAcks(ackIds []string, deadline int32) {
 		}
 		os.Chtimes(msgPath, ackTill, ackTill)
 	}
+}
+
+func (fss *FSSubscriptions) UpdateAck(ackId string, addTime time.Duration) {
+	doTime := addTime
+	if addTime < time.Second {
+		doTime = time.Duration(0)
+	} else if addTime > base.MAX_ACK_TIME {
+		doTime = base.MAX_ACK_TIME
+	}
+	ackTill := time.Now().Add(doTime)
+	fss.ackLock.Lock()
+	defer fss.ackLock.Unlock()
+	logger.Info("Updating Ack for Message:{} extending {}", ackId, doTime)
+	msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", ackId))
+	_, err := os.Stat(msgPath)
+	if err != nil {
+		return
+	}
+	os.Chtimes(msgPath, ackTill, ackTill)
+
 }
 
 func (fss *FSSubscriptions) nackMessages() {
@@ -194,8 +234,9 @@ func (fss *FSSubscriptions) nackMessages() {
 		fss.clientLock.Lock()
 		defer fss.clientLock.Unlock()
 		for _, nack := range nacks {
+			nack_uuid := uuid.MustParse(nack)
 			for _, ss := range fss.streamClients {
-				ss.acksChan <- nack
+				ss.acker.Add() <- nack_uuid
 			}
 		}
 	}
@@ -211,8 +252,9 @@ func (fss *FSSubscriptions) AckMessages(ackIds []string) {
 	fss.clientLock.Lock()
 	defer fss.clientLock.Unlock()
 	for _, ackid := range ackIds {
+		ack_uuid := uuid.MustParse(ackid)
 		for _, ss := range fss.streamClients {
-			ss.acksChan <- ackid
+			ss.acker.Add() <- ack_uuid
 		}
 	}
 
@@ -235,6 +277,7 @@ func (fss *FSSubscriptions) getLocalMessages(max int32) []*pubsub.ReceivedMessag
 			logger.Warn("Error:{}", err)
 			continue
 		}
+
 		rmsg := &pubsub.ReceivedMessage{
 			AckId:   msg.MessageId,
 			Message: msg,
@@ -270,26 +313,33 @@ func (fss *FSSubscriptions) msgToAck(mid string) error {
 	return nil
 }
 
-func (fss *FSSubscriptions) GetMessages(max int32) []*pubsub.ReceivedMessage {
+func (fss *FSSubscriptions) GetMessages(max int32, maxWait time.Duration) []*pubsub.ReceivedMessage {
 	msgs := fss.getLocalMessages(max)
-	startTime := time.Now()
-	for len(msgs) == 0 && time.Since(startTime) < time.Second*30 {
+	if len(msgs) > 0 {
+		return msgs
+	}
+
+	timer := time.NewTimer(maxWait)
+	for len(msgs) == 0 {
 		select {
 		case <-fss.newMsg:
 			msgs = fss.getLocalMessages(max)
-		case <-time.After(time.Second * 1):
-
+		case <-timer.C:
+			return msgs
 		}
+	}
+	if !timer.Stop() {
+		<-timer.C
 	}
 	return msgs
 }
 
 func (fss *FSSubscriptions) Delete() {
 	os.RemoveAll(fss.subPath)
-	fss.topic.RemoveSub(fss.name)
+	fss.topic.DeleteSub(fss.name)
 }
 
-func (fss *FSSubscriptions) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) *StreamingSubcription {
+func (fss *FSSubscriptions) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
 	cid := uuid.NewString()
 	logger.Info("Creating SubStream:{}", cid)
 	ss := &StreamingSubcription{
@@ -300,8 +350,8 @@ func (fss *FSSubscriptions) CreateStreamingSubscription(firstRecvMsg *pubsub.Str
 		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
 		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
 		running:         true,
-		pendingMsgs:     make(map[string]bool),
-		acksChan:        make(chan string, 10000),
+		pendingMsgs:     make(map[uuid.UUID]bool),
+		acker:           utils.NewDynamicUUIDChannel(),
 	}
 	fss.clientLock.Lock()
 	defer fss.clientLock.Unlock()
@@ -310,6 +360,7 @@ func (fss *FSSubscriptions) CreateStreamingSubscription(firstRecvMsg *pubsub.Str
 
 	return ss
 }
+
 func (fss *FSSubscriptions) DeleteStreamingSubscription(ss *StreamingSubcription) {
 	fss.clientLock.Lock()
 	defer fss.clientLock.Unlock()
@@ -321,31 +372,25 @@ type StreamingSubcription struct {
 	sub             *FSSubscriptions
 	maxMsgs         int64
 	maxBytes        int64
-	pendingMsgs     map[string]bool
+	pendingMsgs     map[uuid.UUID]bool
 	currentBytes    int64
 	clientId        string
 	deadline        time.Duration
 	recvChan        chan *pubsub.StreamingPullRequest
-	//Acks or Nack can come in here, doesnt matter we will resend if its a nack
-	acksChan chan string
-	running  bool
+	acker           *utils.DynamicUUIDChannel
+	running         bool
 }
 
 func (ss *StreamingSubcription) Run() {
+	defer ss.sub.DeleteStreamingSubscription(ss)
 	for ss.running {
-		msgs := make([]*pubsub.ReceivedMessage, 0)
 		currentMessageCount := int64(len(ss.pendingMsgs))
-		logger.Info("{} Loop:{}:{}:{}", ss.clientId, ss.maxMsgs, currentMessageCount, len(msgs))
-
-		if currentMessageCount < ss.maxMsgs {
-			msgs = ss.sub.getLocalMessages(int32(ss.maxMsgs - currentMessageCount))
+		if currentMessageCount >= ss.maxMsgs {
+			ss.noMsgSelect()
+			continue
 		}
-		mc := int64(len(msgs))
-		if mc > 0 {
-			for _, msg := range msgs {
-				ss.pendingMsgs[msg.AckId] = true
-			}
-			logger.Info("Sending {} messages, {}:{}", mc, len(ss.pendingMsgs), ss.maxMsgs)
+		msgs := ss.msgSelect()
+		if len(msgs) > 0 {
 			err := ss.streamingServer.Send(&pubsub.StreamingPullResponse{
 				ReceivedMessages: msgs,
 			})
@@ -354,26 +399,49 @@ func (ss *StreamingSubcription) Run() {
 				ss.running = false
 				return
 			}
-			if ss.maxMsgs < int64(len(ss.pendingMsgs)) {
-				continue
+		}
+	}
+}
+
+func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
+	msgs := make([]*pubsub.ReceivedMessage, 0)
+	select {
+	case <-ss.sub.newMsg:
+		currentMessageCount := int64(len(ss.pendingMsgs))
+		msgs = ss.sub.getLocalMessages(int32(ss.maxMsgs - currentMessageCount))
+		for _, msg := range msgs {
+			ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
+		}
+	case aid := <-ss.acker.Get():
+		delete(ss.pendingMsgs, aid)
+	case recvMsg := <-ss.recvChan:
+		if len(recvMsg.AckIds) > 0 {
+			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
+			ss.sub.AckMessages(recvMsg.AckIds)
+		}
+		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
+			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
+			for i := range recvMsg.ModifyDeadlineAckIds {
+				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
 		}
-		select {
-		case <-ss.sub.newMsg:
-		case aid := <-ss.acksChan:
-			delete(ss.pendingMsgs, aid)
-		case recvMsg := <-ss.recvChan:
-			if len(recvMsg.AckIds) > 0 {
-				logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
-				// Do this in another go routine to avoid deadlock
-				// Most acks dont seem to come this way
-				go ss.sub.AckMessages(recvMsg.AckIds)
-			}
-			if len(recvMsg.ModifyDeadlineAckIds) > 0 {
-				logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
-				for i := range recvMsg.ModifyDeadlineAckIds {
-					ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
-				}
+	}
+	return msgs
+}
+
+func (ss *StreamingSubcription) noMsgSelect() {
+	select {
+	case aid := <-ss.acker.Get():
+		delete(ss.pendingMsgs, aid)
+	case recvMsg := <-ss.recvChan:
+		if len(recvMsg.AckIds) > 0 {
+			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
+			ss.sub.AckMessages(recvMsg.AckIds)
+		}
+		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
+			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
+			for i := range recvMsg.ModifyDeadlineAckIds {
+				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
 		}
 	}

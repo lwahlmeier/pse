@@ -6,20 +6,22 @@ import (
 	"path"
 	"sync"
 
+	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 type FSProject struct {
-	Name        string
-	Topics      map[string]*FSTopic
-	ProjectPath string
+	fsBase      *FSBase
+	name        string
+	topics      map[string]*FSTopic
+	projectPath string
 	lock        sync.Mutex
 }
 
-func CreateProject(name, basePath string) (*FSProject, error) {
-	projectPath := path.Join(basePath, name)
+func CreateFSProject(name string, fsb *FSBase) (*FSProject, error) {
+	projectPath := path.Join(fsb.basePath, name)
 	_, err := os.Stat(projectPath)
 	if err == nil {
 		return nil, status.Error(codes.AlreadyExists, "Project Already Exists!")
@@ -31,17 +33,19 @@ func CreateProject(name, basePath string) (*FSProject, error) {
 	if err != nil {
 		return nil, err
 	}
+	logger.Info("Creating Project:{}", name)
 	return &FSProject{
-		Name:        name,
-		ProjectPath: projectPath,
-		Topics:      make(map[string]*FSTopic),
+		fsBase:      fsb,
+		name:        name,
+		projectPath: projectPath,
+		topics:      make(map[string]*FSTopic),
 	}, nil
 
 }
 
-func LoadProject(name, basePath string) (*FSProject, error) {
+func LoadFSProject(name string, fsb *FSBase) (*FSProject, error) {
 	logger.Info("Loading project:{}", name)
-	projectPath := path.Join(basePath, name)
+	projectPath := path.Join(fsb.basePath, name)
 	stat, err := os.Stat(projectPath)
 	if err != nil {
 		return nil, err
@@ -50,64 +54,20 @@ func LoadProject(name, basePath string) (*FSProject, error) {
 		return nil, status.Error(codes.Internal, "Can not create project")
 	}
 	pj := &FSProject{
-		ProjectPath: projectPath,
-		Name:        name,
-		Topics:      make(map[string]*FSTopic),
+		fsBase:      fsb,
+		projectPath: projectPath,
+		name:        name,
+		topics:      make(map[string]*FSTopic),
 	}
-	pj.loadTopics()
+	err = pj.loadTopics()
+	if err != nil {
+		return nil, err
+	}
 	return pj, nil
-	// pjt.projectLock.Lock()
-	// defer pjt.projectLock.Unlock()
-	// fi, err := os.Stat(pjt.ProjectPath)
-	// if err != nil {
-	// 	if !errors.Is(err, os.ErrNotExist) {
-	// 		panic(err)
-	// 	}
-	// 	err = os.MkdirAll(pjt.ProjectPath, os.ModePerm)
-	// 	if err != nil {
-	// 		panic(err)
-	// 	}
-	// }
-	// if fi != nil && !fi.IsDir() {
-	// 	panic(err)
-	// }
-
-	// topics := GetAllTopics(pjt.ProjectPath)
-	// pjt.Topics = make(map[string]*FSTopic)
-	// pjt.TopicSubMap = make(map[string][]string)
-	// pjt.Subscriptions = make(map[string]*pubsub.Subscription)
-	// for _, topic := range topics {
-	// 	tn, err := GetTopicName(topic.Name)
-	// 	if err != nil {
-	// 		logger.Warn("Problems getting topicName:{}, {}", topic.Name, err.Error())
-	// 		continue
-	// 	}
-	// 	pjt.Topics[tn] = topic
-	// 	pjt.TopicSubMap[tn] = make([]string, 0)
-	// }
-	// subs := GetAllSubs(pjt.ProjectPath)
-	// for _, sub := range subs {
-	// 	tn, err := GetTopicName(sub.Topic)
-	// 	if err != nil {
-	// 		logger.Warn("Problems getting topicName:{}, {}", sub.Topic, err.Error())
-	// 		continue
-	// 	}
-	// 	subName, err := GetSubscriptionName(sub.Name)
-	// 	if err != nil {
-	// 		logger.Warn("Problems getting subName:{}, {}", sub.Name, err.Error())
-	// 		continue
-	// 	}
-	// 	if _, ok := pjt.Topics[tn]; ok {
-	// 		pjt.Subscriptions[subName] = sub
-	// 		pjt.TopicSubMap[tn] = append(pjt.TopicSubMap[tn], subName)
-	// 	} else {
-	// 		logger.Warn("Subject:{} missing topic:{}", subName, tn)
-	// 	}
-	// }
 }
 
 func (fsp *FSProject) loadTopics() error {
-	fsil, err := os.ReadDir(fsp.ProjectPath)
+	fsil, err := os.ReadDir(fsp.projectPath)
 	if err != nil {
 		return err
 	}
@@ -116,7 +76,7 @@ func (fsp *FSProject) loadTopics() error {
 		if !fsi.IsDir() {
 			continue
 		}
-		fsTopic, err := LoadTopic(fsi.Name(), fsp)
+		fsTopic, err := LoadFSTopic(fsi.Name(), fsp)
 		if err != nil {
 			continue
 		}
@@ -125,157 +85,70 @@ func (fsp *FSProject) loadTopics() error {
 	fsp.lock.Lock()
 	defer fsp.lock.Unlock()
 	for _, fsTopic := range fsTopics {
-		fsp.Topics[fsTopic.name] = fsTopic
+		fsp.topics[fsTopic.name] = fsTopic
 	}
 	return nil
 }
 
-func (pjt *FSProject) GetTopic(topicName string) *FSTopic {
-	pjt.lock.Lock()
-	defer pjt.lock.Unlock()
-	return pjt.Topics[topicName]
+func (fsp *FSProject) GetBase() base.BaseBackend {
+	return fsp.fsBase
 }
 
-func (pjt *FSProject) AddTopic(topic *pubsub.Topic) error {
-	tn, err := GetTopicName(topic.Name)
+func (fsp *FSProject) GetName() string {
+	return fsp.name
+}
+
+func (pjt *FSProject) CreateTopic(topic *pubsub.Topic) error {
+	_, tn, err := pjt.fsBase.ParseProjectAndTopicName(topic.Name)
 	if err != nil {
 		return err
 	}
 	pjt.lock.Lock()
 	defer pjt.lock.Unlock()
-	if _, ok := pjt.Topics[tn]; ok {
+	if _, ok := pjt.topics[tn]; ok {
 		return status.Error(codes.AlreadyExists, "Topic Already Exists")
 	}
 	fsTopic, err := CreateFSTopic(pjt, topic)
 	if err != nil {
 		return err
 	}
-	pjt.Topics[tn] = fsTopic
+	pjt.topics[tn] = fsTopic
 	return nil
 }
 
-func (pjt *FSProject) RemoveTopic(topicName string) {
+func (pjt *FSProject) GetTopic(topicName string) base.BaseTopic {
 	pjt.lock.Lock()
 	defer pjt.lock.Unlock()
-	delete(pjt.Topics, topicName)
-}
-
-func (pjt *FSProject) AddSub(sub *pubsub.Subscription) error {
-	topicName, err := GetTopicName(sub.Topic)
-	if err != nil {
-		return nil
+	if topic, ok := pjt.topics[topicName]; ok {
+		return topic
 	}
-	fsTopic := pjt.GetTopic(topicName)
-	if fsTopic == nil {
-		return status.Error(codes.NotFound, "Topic does not Exist")
-	}
-	subName, err := GetSubscriptionName(sub.Name)
-	if err != nil {
-		return nil
-	}
-	fsSub := pjt.GetSubscription(subName)
-	if fsSub == nil {
-		return status.Error(codes.AlreadyExists, "Subscription Already Exits")
-	}
-
-	return fsTopic.AddSub(sub)
-}
-
-func (pjt *FSProject) GetSubscription(subName string) *FSSubscriptions {
-	subs := pjt.GetFSSubs()
-	return subs[subName]
-}
-
-func (pjt *FSProject) DeleteSubscription(subName string) error {
-	fsSub := pjt.GetSubscription(subName)
-	if fsSub == nil {
-		return status.Error(codes.NotFound, "No such Subject Exists")
-	}
-	pjt.lock.Lock()
-	defer pjt.lock.Unlock()
-	fsSub.Delete()
 	return nil
 }
 
-func (pjt *FSProject) GetAllTopics() []*pubsub.Topic {
+func (pjt *FSProject) DeleteTopic(topicName string) {
 	pjt.lock.Lock()
 	defer pjt.lock.Unlock()
-	topics := make([]*pubsub.Topic, 0)
-	for _, topic := range pjt.Topics {
-		topics = append(topics, topic.pubsubTopic)
+	delete(pjt.topics, topicName)
+}
+
+func (pjt *FSProject) GetAllTopics() map[string]base.BaseTopic {
+	pjt.lock.Lock()
+	defer pjt.lock.Unlock()
+	topics := make(map[string]base.BaseTopic)
+	for name, topic := range pjt.topics {
+		topics[name] = topic
 	}
 	return topics
 }
 
-func (pjt *FSProject) GetFSSubs() map[string]*FSSubscriptions {
+func (pjt *FSProject) GetAllSubscriptions() map[string]base.BaseSubscription {
 	pjt.lock.Lock()
 	defer pjt.lock.Unlock()
-	subs := make(map[string]*FSSubscriptions)
-	for _, fsTopic := range pjt.Topics {
-		logger.Info("Topic:{}", fsTopic.name)
-		for _, fsSub := range fsTopic.GetAllSubscriptions() {
-			subs[fsSub.name] = fsSub
-			logger.Info("Subject:{}", fsSub.name)
+	subs := make(map[string]base.BaseSubscription)
+	for _, fsTopic := range pjt.topics {
+		for _, fsSub := range fsTopic.GetAllSubs() {
+			subs[fsSub.GetName()] = fsSub
 		}
 	}
 	return subs
-}
-
-func (pjt *FSProject) GetAllSubscription() []*pubsub.Subscription {
-	pjt.lock.Lock()
-	defer pjt.lock.Unlock()
-	subs := make([]*pubsub.Subscription, 0)
-	for _, fsTopic := range pjt.Topics {
-		for _, fsSub := range fsTopic.GetAllSubscriptions() {
-			subs = append(subs, fsSub.pubsubSubscription)
-		}
-	}
-	return subs
-}
-
-func (pjt *FSProject) GetSubsForTopic(topicName string) []*pubsub.Subscription {
-	fsTopic := pjt.GetTopic(topicName)
-	subs := make([]*pubsub.Subscription, 0)
-	if fsTopic == nil {
-		return subs
-	}
-	fsSubs := fsTopic.GetAllSubscriptions()
-
-	for _, fsSub := range fsSubs {
-		subs = append(subs, fsSub.pubsubSubscription)
-	}
-
-	return subs
-}
-
-func (pjt *FSProject) PublishMessage(topicName string, msg *pubsub.PubsubMessage) error {
-	fsTopic := pjt.GetTopic(topicName)
-	if fsTopic == nil {
-		return status.Error(codes.NotFound, "No Such Topic")
-	}
-	return fsTopic.Publish(msg)
-	// pjt.projectLock.Lock()
-	// defer pjt.projectLock.Unlock()
-	// tn, err := GetTopicName(topic.Name)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// msg_data, err := proto.Marshal(msg)
-	// if err != nil {
-	// 	logger.Warn("Problem Marshaling protobuf:{}", err.Error())
-	// 	return err
-	// }
-	// if subs, ok := pjt.TopicSubMap[tn]; ok {
-	// 	for _, sub := range subs {
-	// 		sub_path := path.Join(pjt.ProjectPath, tn, sub)
-	// 		msg_path := path.Join(sub_path, msg.MessageId)
-	// 		err := ioutil.WriteFile(msg_path, msg_data, os.ModePerm)
-	// 		if err != nil {
-	// 			logger.Warn("Problem problem writing message:{}:{}", msg.MessageId, err)
-	// 		}
-	// 	}
-	// 	return nil
-	// }
-	// return nil
 }
