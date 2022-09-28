@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/fspubsub"
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/mempubsub"
 	"github.com/google/uuid"
 	"github.com/lwahlmeier/lcwlog"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
@@ -21,29 +19,12 @@ type PubSubEmulator struct {
 	baseBackend base.BaseBackend
 }
 
-func NewMemoryPubSubEmulator() *PubSubEmulator {
-	return &PubSubEmulator{
-		baseBackend: mempubsub.NewMemBase(),
-	}
-}
-
-func NewFileSystemPubSubEmulator(basePath string) (*PubSubEmulator, error) {
-	baseBackend, err := fspubsub.StartFSBase(basePath)
-	if err != nil {
-		return nil, err
-	}
-	ps := &PubSubEmulator{
-		baseBackend: baseBackend,
-	}
-	return ps, nil
-}
-
 func (ps *PubSubEmulator) CreateTopic(ctx context.Context, topic *pubsub.Topic) (*pubsub.Topic, error) {
 	pjName, tn, err := ps.baseBackend.ParseProjectAndTopicName(topic.Name)
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got CreateTopic: {}", pjName, tn)
+	logger.Debug("Got CreateTopic for Project:{}, Topic: {}", pjName, tn)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -56,16 +37,16 @@ func (ps *PubSubEmulator) CreateTopic(ctx context.Context, topic *pubsub.Topic) 
 }
 
 func (ps *PubSubEmulator) UpdateTopic(ctx context.Context, utr *pubsub.UpdateTopicRequest) (*pubsub.Topic, error) {
+	logger.Warn("Got UpdateTopic, Not implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateTopic not implemented")
 }
 
 func (ps *PubSubEmulator) Publish(ctx context.Context, pr *pubsub.PublishRequest) (*pubsub.PublishResponse, error) {
-	logger.Info("Publishing Message")
 	pjName, topicName, err := ps.baseBackend.ParseProjectAndTopicName(pr.Topic)
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got Publish to:{}", pjName, topicName)
+	logger.Debug("Got Public for Project:{}, Topic:{}", pjName, topicName)
 	fsProject, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -91,7 +72,7 @@ func (ps *PubSubEmulator) GetTopic(ctx context.Context, rTopic *pubsub.GetTopicR
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got GetTopic: {}", pjName, topicName)
+	logger.Debug("Got GetTopic for Project:{}, Topic: {}", pjName, topicName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -108,6 +89,7 @@ func (ps *PubSubEmulator) ListTopics(ctx context.Context, ltr *pubsub.ListTopics
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got ListTopics for Project:{}", pjName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -123,7 +105,7 @@ func (ps *PubSubEmulator) ListTopicSubscriptions(ctx context.Context, ltsr *pubs
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got GetTopic: {}", pjName, topicName)
+	logger.Debug("Got ListTopicSubscriptions for Project:{}, Topic: {}", pjName, topicName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -142,6 +124,7 @@ func (ps *PubSubEmulator) ListTopicSubscriptions(ctx context.Context, ltsr *pubs
 }
 
 func (pc *PubSubEmulator) ListTopicSnapshots(context.Context, *pubsub.ListTopicSnapshotsRequest) (*pubsub.ListTopicSnapshotsResponse, error) {
+	logger.Warn("ListTopicSnapshots not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method ListTopicSnapshots not implemented")
 }
 func (ps *PubSubEmulator) DeleteTopic(ctx context.Context, dtr *pubsub.DeleteTopicRequest) (*emptypb.Empty, error) {
@@ -149,7 +132,7 @@ func (ps *PubSubEmulator) DeleteTopic(ctx context.Context, dtr *pubsub.DeleteTop
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got GetTopic: {}", pjName, topicName)
+	logger.Debug("Got DeleteTopic for Project:{}, Topic: {}", pjName, topicName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -162,6 +145,7 @@ func (ps *PubSubEmulator) DeleteTopic(ctx context.Context, dtr *pubsub.DeleteTop
 	return nil, nil
 }
 func (pc *PubSubEmulator) DetachSubscription(context.Context, *pubsub.DetachSubscriptionRequest) (*pubsub.DetachSubscriptionResponse, error) {
+	logger.Warn("DetachSubscription not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method DetachSubscription not implemented")
 }
 
@@ -176,10 +160,17 @@ func (ps *PubSubEmulator) CreateSubscription(ctx context.Context, sub *pubsub.Su
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Project:{}, Got GetTopic: {}", pjName, topicName)
+	logger.Debug("Got CreateSubscription for Project:{}, Topic: {}, Sub:{}", pjName, topicName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
+	}
+	subs := project.GetAllSubscriptions()
+	//Cant have duplicate sub names in the same project
+	for prevSubName, _ := range subs {
+		if subName == prevSubName {
+			return nil, status.Error(codes.AlreadyExists, "Subject name already exists")
+		}
 	}
 	topic := project.GetTopic(topicName)
 	if topic == nil {
@@ -187,10 +178,9 @@ func (ps *PubSubEmulator) CreateSubscription(ctx context.Context, sub *pubsub.Su
 	}
 	err = topic.CreateSub(sub)
 	if err != nil {
-		logger.Info("Project:{},Topic:{} error creating Sub:{}", pjName, topicName, err.Error())
+		logger.Warn("Project:{},Topic:{} error creating Sub:{}", pjName, topicName, err.Error())
 		return nil, err
 	}
-	logger.Info("Project:{},Topic:{},Sub:{}", pjName, topicName, subName)
 	return sub, nil
 }
 
@@ -199,6 +189,7 @@ func (ps *PubSubEmulator) GetSubscription(ctx context.Context, sr *pubsub.GetSub
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got GetSubscription for Project:{} Sub:{}", pjName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -211,6 +202,7 @@ func (ps *PubSubEmulator) GetSubscription(ctx context.Context, sr *pubsub.GetSub
 }
 
 func (ss *PubSubEmulator) UpdateSubscription(context.Context, *pubsub.UpdateSubscriptionRequest) (*pubsub.Subscription, error) {
+	logger.Warn("UpdateSubscription not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateSubscription not implemented")
 }
 func (ps *PubSubEmulator) ListSubscriptions(ctx context.Context, lsr *pubsub.ListSubscriptionsRequest) (*pubsub.ListSubscriptionsResponse, error) {
@@ -218,6 +210,7 @@ func (ps *PubSubEmulator) ListSubscriptions(ctx context.Context, lsr *pubsub.Lis
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got ListSubscriptions for Project:{}", pjName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -234,6 +227,7 @@ func (ps *PubSubEmulator) DeleteSubscription(ctx context.Context, dsr *pubsub.De
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got DeleteSubscription Project:{} Sub:{}", pjName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -245,11 +239,11 @@ func (ps *PubSubEmulator) DeleteSubscription(ctx context.Context, dsr *pubsub.De
 	return &emptypb.Empty{}, nil
 }
 func (ps *PubSubEmulator) ModifyAckDeadline(ctx context.Context, madr *pubsub.ModifyAckDeadlineRequest) (*emptypb.Empty, error) {
-	logger.Info("ModifyAckDeadline")
 	pjName, subName, err := ps.baseBackend.ParseProjectAndSubscriptionName(madr.Subscription)
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got ModifyAckDeadline Project:{} Sub:{}", pjName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -265,11 +259,11 @@ func (ps *PubSubEmulator) ModifyAckDeadline(ctx context.Context, madr *pubsub.Mo
 
 }
 func (ps *PubSubEmulator) Acknowledge(ctx context.Context, ar *pubsub.AcknowledgeRequest) (*emptypb.Empty, error) {
-	logger.Info("Acknowledge")
 	pjName, subName, err := ps.baseBackend.ParseProjectAndSubscriptionName(ar.Subscription)
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got Acknowledge Project:{} Sub:{}", pjName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
@@ -284,16 +278,16 @@ func (ps *PubSubEmulator) Acknowledge(ctx context.Context, ar *pubsub.Acknowledg
 	return &emptypb.Empty{}, nil
 }
 func (ps *PubSubEmulator) Pull(ctx context.Context, pr *pubsub.PullRequest) (*pubsub.PullResponse, error) {
-	logger.Info("Pull")
 	pjName, subName, err := ps.baseBackend.ParseProjectAndSubscriptionName(pr.Subscription)
 	if err != nil {
 		return nil, err
 	}
+	logger.Debug("Got Pull for Project:{} Sub:{}", pjName, subName)
+
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return nil, err
 	}
-
 	subs := project.GetAllSubscriptions()
 	sub, ok := subs[subName]
 	if !ok {
@@ -304,6 +298,7 @@ func (ps *PubSubEmulator) Pull(ctx context.Context, pr *pubsub.PullRequest) (*pu
 }
 
 func (ps *PubSubEmulator) StreamingPull(pullServer pubsub.Subscriber_StreamingPullServer) error {
+	logger.Debug("Got StreamingPull, getting First message")
 	pullRequest, err := pullServer.Recv()
 	if err != nil {
 		return err
@@ -312,39 +307,45 @@ func (ps *PubSubEmulator) StreamingPull(pullServer pubsub.Subscriber_StreamingPu
 	if err != nil {
 		return err
 	}
+	logger.Debug("Got StreamingPull for Project:{} and Sub:{}", pjName, subName)
 	project, err := ps.baseBackend.GetProject(pjName)
 	if err != nil {
 		return err
 	}
-
 	subs := project.GetAllSubscriptions()
 	sub, ok := subs[subName]
 	if !ok {
 		return status.Error(codes.NotFound, "Subscription not found")
 	}
-
 	ss := sub.CreateStreamingSubscription(pullRequest, pullServer)
 	ss.Run()
 	return err
 }
 func (ss *PubSubEmulator) ModifyPushConfig(context.Context, *pubsub.ModifyPushConfigRequest) (*emptypb.Empty, error) {
+	logger.Warn("Got ModifyPushConfig not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method ModifyPushConfig not implemented")
 }
 func (ss *PubSubEmulator) GetSnapshot(context.Context, *pubsub.GetSnapshotRequest) (*pubsub.Snapshot, error) {
+	logger.Warn("Got GetSnapshot not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
 }
 func (ss *PubSubEmulator) ListSnapshots(context.Context, *pubsub.ListSnapshotsRequest) (*pubsub.ListSnapshotsResponse, error) {
+	logger.Warn("Got ListSnapshots not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method ListSnapshots not implemented")
 }
 func (ss *PubSubEmulator) CreateSnapshot(context.Context, *pubsub.CreateSnapshotRequest) (*pubsub.Snapshot, error) {
+	logger.Warn("Got CreateSnapshot not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method CreateSnapshot not implemented")
 }
 func (ss *PubSubEmulator) UpdateSnapshot(context.Context, *pubsub.UpdateSnapshotRequest) (*pubsub.Snapshot, error) {
+	logger.Warn("Got UpdateSnapshot not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateSnapshot not implemented")
 }
 func (ss *PubSubEmulator) DeleteSnapshot(context.Context, *pubsub.DeleteSnapshotRequest) (*emptypb.Empty, error) {
+	logger.Warn("Got DeleteSnapshot not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteSnapshot not implemented")
 }
 func (ss *PubSubEmulator) Seek(context.Context, *pubsub.SeekRequest) (*pubsub.SeekResponse, error) {
+	logger.Warn("Got Seek not Implemented")
 	return nil, status.Errorf(codes.Unimplemented, "method Seek not implemented")
 }

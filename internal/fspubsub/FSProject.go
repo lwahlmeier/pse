@@ -33,7 +33,7 @@ func CreateFSProject(name string, fsb *FSBase) (*FSProject, error) {
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("Creating Project:{}", name)
+	logger.Info("Created Project:{}", name)
 	return &FSProject{
 		fsBase:      fsb,
 		name:        name,
@@ -44,7 +44,6 @@ func CreateFSProject(name string, fsb *FSBase) (*FSProject, error) {
 }
 
 func LoadFSProject(name string, fsb *FSBase) (*FSProject, error) {
-	logger.Info("Loading project:{}", name)
 	projectPath := path.Join(fsb.basePath, name)
 	stat, err := os.Stat(projectPath)
 	if err != nil {
@@ -59,6 +58,7 @@ func LoadFSProject(name string, fsb *FSBase) (*FSProject, error) {
 		name:        name,
 		topics:      make(map[string]*FSTopic),
 	}
+	logger.Info("Loading Project:{}", name)
 	err = pj.loadTopics()
 	if err != nil {
 		return nil, err
@@ -108,7 +108,7 @@ func (pjt *FSProject) CreateTopic(topic *pubsub.Topic) error {
 	if _, ok := pjt.topics[tn]; ok {
 		return status.Error(codes.AlreadyExists, "Topic Already Exists")
 	}
-	fsTopic, err := CreateFSTopic(pjt, topic)
+	fsTopic, err := CreateFSTopic(tn, pjt, topic)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,12 @@ func (pjt *FSProject) GetTopic(topicName string) base.BaseTopic {
 func (pjt *FSProject) DeleteTopic(topicName string) {
 	pjt.lock.Lock()
 	defer pjt.lock.Unlock()
-	delete(pjt.topics, topicName)
+	if topic, ok := pjt.topics[topicName]; ok {
+		delete(pjt.topics, topicName)
+		os.RemoveAll(topic.topicPath)
+		logger.Info("Deleted Topic:{} for Project:{}", topicName, pjt.name)
+	}
+
 }
 
 func (pjt *FSProject) GetAllTopics() map[string]base.BaseTopic {

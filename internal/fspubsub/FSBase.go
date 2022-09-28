@@ -38,7 +38,6 @@ func StartFSBase(basePath string) (*FSBase, error) {
 			if err != nil {
 				return nil, err
 			}
-			logger.Info("Loaded Project:{}", fsi.Name())
 			fsb.projects[fsi.Name()] = fsProject
 		}
 	}
@@ -51,6 +50,7 @@ func (fsb *FSBase) ParseProjectName(project string) (string, error) {
 	if len(items) >= 2 && items[0] == "projects" {
 		return items[1], nil
 	}
+	logger.Warn("Got bad project name:{}", project)
 	return "", fmt.Errorf("bad project name: %s", project)
 }
 func (fsb *FSBase) ParseProjectAndTopicName(topicName string) (string, string, error) {
@@ -62,6 +62,7 @@ func (fsb *FSBase) ParseProjectAndTopicName(topicName string) (string, string, e
 	if len(items) >= 4 && items[0] == "projects" && items[2] == "topics" {
 		return pjName, items[3], nil
 	}
+	logger.Warn("Got bad topic name:{}", topicName)
 	return "", "", fmt.Errorf("bad topic name: %s", topicName)
 }
 func (fsb *FSBase) ParseProjectAndSubscriptionName(subName string) (string, string, error) {
@@ -73,6 +74,7 @@ func (fsb *FSBase) ParseProjectAndSubscriptionName(subName string) (string, stri
 	if len(items) >= 2 && items[0] == "projects" && items[2] == "subscriptions" {
 		return pjName, items[3], nil
 	}
+	logger.Warn("Got bad Subject name:{}", subName)
 	return "", "", fmt.Errorf("bad subscription name: %s", subName)
 }
 
@@ -89,6 +91,12 @@ func (fsb *FSBase) GetProject(pjName string) (base.BaseProject, error) {
 	fsb.projects[pjName] = pjt
 	return pjt, nil
 }
-func (fsb *FSBase) DeleteProject(string) {
-
+func (fsb *FSBase) DeleteProject(pjName string) {
+	fsb.mapLock.Lock()
+	defer fsb.mapLock.Unlock()
+	if pjt, ok := fsb.projects[pjName]; ok {
+		delete(fsb.projects, pjName)
+		os.RemoveAll(pjt.projectPath)
+		logger.Info("Deleted Project:{}", pjName)
+	}
 }

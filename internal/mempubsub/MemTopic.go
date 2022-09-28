@@ -17,8 +17,10 @@ type MemTopic struct {
 	subLock sync.Mutex
 }
 
-func NewMemTopic(project *MemProject, topic *pubsub.Topic) *MemTopic {
+func NewMemTopic(name string, project *MemProject, topic *pubsub.Topic) *MemTopic {
+	logger.Info("Created Topic:{} for Project:{}", name, project.name)
 	return &MemTopic{
+		name:    name,
 		project: project,
 		topic:   topic,
 		subs:    make(map[string]*MemSubscription),
@@ -55,7 +57,11 @@ func (mt *MemTopic) GetSub(subName string) base.BaseSubscription {
 func (mt *MemTopic) DeleteSub(subName string) {
 	mt.subLock.Lock()
 	defer mt.subLock.Unlock()
-	delete(mt.subs, subName)
+	if sub, ok := mt.subs[subName]; ok {
+		logger.Info("Deleting Sub:{} for Topic:{} on Project:{}", subName, mt.name, mt.project.name)
+		sub.stop()
+		delete(mt.subs, subName)
+	}
 }
 func (mt *MemTopic) GetAllSubs() []base.BaseSubscription {
 	baseSubs := make([]base.BaseSubscription, 0)

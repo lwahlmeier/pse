@@ -17,6 +17,7 @@ type MemBase struct {
 }
 
 func NewMemBase() *MemBase {
+	logger.Info("Creating MemoryBase")
 	return &MemBase{
 		projects: make(map[string]*MemProject),
 	}
@@ -27,6 +28,7 @@ func (mb *MemBase) ParseProjectName(project string) (string, error) {
 	if len(items) >= 2 && items[0] == "projects" {
 		return items[1], nil
 	}
+	logger.Warn("Got bad Project name:{}", project)
 	return "", fmt.Errorf("bad project name: %s", project)
 }
 func (mb *MemBase) ParseProjectAndTopicName(topicName string) (string, string, error) {
@@ -38,6 +40,7 @@ func (mb *MemBase) ParseProjectAndTopicName(topicName string) (string, string, e
 	if len(items) >= 4 && items[0] == "projects" && items[2] == "topics" {
 		return pjName, items[3], nil
 	}
+	logger.Warn("Got bad Topic name:{}", topicName)
 	return "", "", fmt.Errorf("bad topic name: %s", topicName)
 }
 func (mb *MemBase) ParseProjectAndSubscriptionName(subName string) (string, string, error) {
@@ -49,6 +52,7 @@ func (mb *MemBase) ParseProjectAndSubscriptionName(subName string) (string, stri
 	if len(items) >= 2 && items[0] == "projects" && items[2] == "subscriptions" {
 		return pjName, items[3], nil
 	}
+	logger.Warn("Got bad Subject name:{}", subName)
 	return "", "", fmt.Errorf("bad subscription name: %s", subName)
 }
 

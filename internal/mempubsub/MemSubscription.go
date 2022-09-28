@@ -10,6 +10,8 @@ import (
 	"google.golang.org/genproto/googleapis/pubsub/v1"
 )
 
+var ack_check_time = time.Second * 5
+
 type MsgTime struct {
 	msg     *pubsub.ReceivedMessage
 	expTime time.Time
@@ -53,6 +55,7 @@ func NewMemSub(name string, topic *MemTopic, sub *pubsub.Subscription) *MemSubsc
 		running:       true,
 	}
 	go ms.watcher()
+	logger.Info("Created Sub:{} for Topic:{} and Project:{}", name, topic.name, topic.project.name)
 	return ms
 }
 
@@ -121,10 +124,11 @@ func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*
 }
 func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
 	cid := uuid.NewString()
-	logger.Info("Creating SubStream:{}", cid)
+	logger.Info("Project:{}:Topic:{}:Sub:{}, Creating SubStream:{}", ms.topic.project.name, ms.topic.name, ms.name, cid)
 	ss := &StreamingSubcription{
 		sub:             ms,
 		streamingServer: streamingServer,
+		timer:           time.NewTimer(ack_check_time),
 		clientId:        cid,
 		maxMsgs:         firstRecvMsg.MaxOutstandingMessages,
 		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
@@ -144,15 +148,21 @@ func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.Stre
 func (ms *MemSubscription) DeleteStreamingSubscription(ss *StreamingSubcription) {
 	ms.clientLock.Lock()
 	defer ms.clientLock.Unlock()
+	ss.running = false
 	delete(ms.streamClients, ss.clientId)
 }
 
 func (ms *MemSubscription) stop() {
 	ms.running = false
+	ms.clientLock.Lock()
+	defer ms.clientLock.Unlock()
+	for _, ss := range ms.streamClients {
+		ss.running = false
+		ss.streamingServer.Context().Done()
+	}
 }
 
 func (ms *MemSubscription) watcher() {
-	ack_check_time := time.Second * 5
 	timer := time.NewTimer(ack_check_time)
 	for ms.running {
 		<-timer.C
@@ -162,7 +172,7 @@ func (ms *MemSubscription) watcher() {
 }
 
 func (ms *MemSubscription) checkNack() {
-	logger.Info("Checking Nack")
+	logger.Debug("Checking For Nacks")
 	ms.ackLock.Lock()
 	defer ms.ackLock.Unlock()
 	for mid, mt := range ms.acks {
@@ -204,6 +214,7 @@ func (ms *MemSubscription) watchMesageAck(msg *pubsub.ReceivedMessage, deadline 
 type StreamingSubcription struct {
 	streamingServer pubsub.Subscriber_StreamingPullServer
 	sub             *MemSubscription
+	timer           *time.Timer
 	maxMsgs         int64
 	maxBytes        int64
 	pendingMsgs     map[uuid.UUID]bool
@@ -230,6 +241,7 @@ func (ss *StreamingSubcription) Run() {
 			if err != nil {
 				logger.Warn("Error StreamSending Message:{}", err.Error())
 				ss.running = false
+				ss.streamingServer.Context().Err()
 				return
 			}
 		}
@@ -240,7 +252,6 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 	msgs := make([]*pubsub.ReceivedMessage, 0)
 	select {
 	case msg := <-ss.sub.msgChannel.Get():
-		logger.Info("Sending Message:{}", msg)
 		ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 		ss.sub.watchMesageAck(msg, ss.deadline)
 		msgs = append(msgs, msg)
@@ -258,15 +269,15 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 		delete(ss.pendingMsgs, aid)
 	case recvMsg := <-ss.recvChan:
 		if len(recvMsg.AckIds) > 0 {
-			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
 			ss.sub.AckMessages(recvMsg.AckIds)
 		}
 		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
-			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
 			for i := range recvMsg.ModifyDeadlineAckIds {
 				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
 		}
+	case <-ss.timer.C:
+		ss.timer.Reset(ack_check_time)
 	}
 	return msgs
 }
@@ -276,11 +287,9 @@ func (ss *StreamingSubcription) noMsgSelect() {
 		delete(ss.pendingMsgs, aid)
 	case recvMsg := <-ss.recvChan:
 		if len(recvMsg.AckIds) > 0 {
-			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
 			ss.sub.AckMessages(recvMsg.AckIds)
 		}
 		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
-			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
 			for i := range recvMsg.ModifyDeadlineAckIds {
 				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
@@ -291,7 +300,6 @@ func (ss *StreamingSubcription) noMsgSelect() {
 func (ss *StreamingSubcription) watchRecv() {
 	for ss.running {
 		msg, err := ss.streamingServer.Recv()
-		logger.Info("{}: WatchRecv: {}", ss.clientId, msg)
 		if !ss.running || err != nil {
 			logger.Warn("Error StreamRecv:{}", err.Error())
 			ss.running = false

@@ -71,12 +71,12 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 	if err != nil {
 		return nil, err
 	}
+	logger.Info("Created Sub:{} for Topic:{} in Project:{}", subName, topic.name, topic.project.name)
 	go fsSub.watchMessages()
 	return fsSub, nil
 }
 
 func LoadSubscription(subName string, topic *FSTopic) (*FSSubscriptions, error) {
-	logger.Info("Project:{}:Topic:{} loading Sub:{}", topic.project.name, topic.name, subName)
 	subPath := path.Join(topic.topicPath, subName)
 	fsSub := &FSSubscriptions{
 		name:          subName,
@@ -99,6 +99,7 @@ func LoadSubscription(subName string, topic *FSTopic) (*FSSubscriptions, error) 
 		return nil, err
 	}
 	fsSub.pubsubSubscription = psSub
+	logger.Info("Loaded Sub:{} for Topic:{} in Project:{}", subName, topic.name, topic.project.name)
 	go fsSub.watchMessages()
 	return fsSub, nil
 }
@@ -125,7 +126,6 @@ func (fss *FSSubscriptions) watchMessages() {
 				if !strings.HasSuffix(event.Name, ".msg.proto") {
 					break
 				}
-				logger.Info("New Message:{}", event)
 				select {
 				case fss.newMsg <- event.Name:
 				default:
@@ -178,7 +178,6 @@ func (fss *FSSubscriptions) UpdateAcks(ackIds []string, deadline int32) {
 	defer fss.ackLock.Unlock()
 	// We do this here to save multipule locks if we do UpdateAck
 	for _, mid := range ackIds {
-		logger.Info("Updating Ack for Message:{} extending {}", mid, doTime)
 		msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", mid))
 		_, err := os.Stat(msgPath)
 		if err != nil {
@@ -198,7 +197,6 @@ func (fss *FSSubscriptions) UpdateAck(ackId string, addTime time.Duration) {
 	ackTill := time.Now().Add(doTime)
 	fss.ackLock.Lock()
 	defer fss.ackLock.Unlock()
-	logger.Info("Updating Ack for Message:{} extending {}", ackId, doTime)
 	msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", ackId))
 	_, err := os.Stat(msgPath)
 	if err != nil {
@@ -225,7 +223,7 @@ func (fss *FSSubscriptions) nackMessages() {
 			continue
 		}
 		if time.Until(fsi.ModTime()) <= time.Duration(0) {
-			logger.Info("Message Hit Nack Deadline:{}", mid)
+			logger.Info("{}:{}:{}: Deadline hit, NACKing message:{}", fss.topic.project.name, fss.topic.name, fss.name, mid)
 			os.Rename(ackPath, msgPath)
 			nacks = append(nacks, mid)
 		}
@@ -243,10 +241,8 @@ func (fss *FSSubscriptions) nackMessages() {
 }
 
 func (fss *FSSubscriptions) AckMessages(ackIds []string) {
-	logger.Info("Got ACK:{}", ackIds)
 	for _, ackid := range ackIds {
 		ackFile := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", ackid))
-		// os.Rename(ackFile, path.Join(fss.subPath, fmt.Sprintf("%s.done.proto", ackid)))
 		os.RemoveAll(ackFile)
 	}
 	fss.clientLock.Lock()
@@ -261,7 +257,6 @@ func (fss *FSSubscriptions) AckMessages(ackIds []string) {
 }
 
 func (fss *FSSubscriptions) getLocalMessages(max int32) []*pubsub.ReceivedMessage {
-	logger.Info("getLocalMessages:{}", max)
 	fss.msgLock.Lock()
 	defer fss.msgLock.Unlock()
 	msgs := make([]*pubsub.ReceivedMessage, 0)
@@ -341,7 +336,7 @@ func (fss *FSSubscriptions) Delete() {
 
 func (fss *FSSubscriptions) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
 	cid := uuid.NewString()
-	logger.Info("Creating SubStream:{}", cid)
+	logger.Info("Project:{}:Topic:{}:Sub:{}, Creating SubStream:{}", fss.topic.project.name, fss.topic.name, fss.name, cid)
 	ss := &StreamingSubcription{
 		sub:             fss,
 		streamingServer: streamingServer,
@@ -416,11 +411,9 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 		delete(ss.pendingMsgs, aid)
 	case recvMsg := <-ss.recvChan:
 		if len(recvMsg.AckIds) > 0 {
-			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
 			ss.sub.AckMessages(recvMsg.AckIds)
 		}
 		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
-			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
 			for i := range recvMsg.ModifyDeadlineAckIds {
 				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
@@ -435,11 +428,9 @@ func (ss *StreamingSubcription) noMsgSelect() {
 		delete(ss.pendingMsgs, aid)
 	case recvMsg := <-ss.recvChan:
 		if len(recvMsg.AckIds) > 0 {
-			logger.Info("{}: Acking:{}", ss.clientId, len(recvMsg.AckIds))
 			ss.sub.AckMessages(recvMsg.AckIds)
 		}
 		if len(recvMsg.ModifyDeadlineAckIds) > 0 {
-			logger.Info("{}: ModAck:{}", ss.clientId, (recvMsg.ModifyDeadlineSeconds))
 			for i := range recvMsg.ModifyDeadlineAckIds {
 				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
@@ -450,7 +441,6 @@ func (ss *StreamingSubcription) noMsgSelect() {
 func (ss *StreamingSubcription) watchRecv() {
 	for ss.running {
 		msg, err := ss.streamingServer.Recv()
-		logger.Info("{}: WatchRecv: {}", ss.clientId, msg)
 		if !ss.running || err != nil {
 			logger.Warn("Error StreamRecv:{}", err.Error())
 			ss.running = false

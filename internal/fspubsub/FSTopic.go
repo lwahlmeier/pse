@@ -24,19 +24,16 @@ type FSTopic struct {
 	lock        sync.Mutex
 }
 
-func CreateFSTopic(project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
-	topicName, err := GetTopicName(topic.Name)
-	if err != nil {
-		return nil, err
-	}
+func CreateFSTopic(topicName string, project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
 	basePath := path.Join(project.projectPath, topicName)
-	_, err = os.Stat(basePath)
+	_, err := os.Stat(basePath)
 	if err == nil {
 		return nil, status.Error(codes.AlreadyExists, "Topic Already Exists")
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	logger.Info("Creating Topic:{} for Project:{}", topicName, project.name)
 	err = os.MkdirAll(basePath, os.ModePerm)
 	if err != nil {
 		return nil, err
@@ -61,7 +58,6 @@ func CreateFSTopic(project *FSProject, topic *pubsub.Topic) (*FSTopic, error) {
 }
 
 func LoadFSTopic(topicName string, project *FSProject) (*FSTopic, error) {
-	logger.Info("Project:{} Loading Topic:{}", project.name, topicName)
 	basePath := path.Join(project.projectPath, topicName)
 	fst := &FSTopic{
 		project:   project,
@@ -85,6 +81,7 @@ func LoadFSTopic(topicName string, project *FSProject) (*FSTopic, error) {
 		return nil, err
 	}
 	fst.pubsubTopic = topic
+	logger.Info("Loaded Topic:{} for Project:{} ", topicName, project.name)
 	fst.loadSubs()
 	return fst, nil
 }
@@ -111,12 +108,6 @@ func (fst *FSTopic) loadSubs() error {
 		fst.subs[fsSub.name] = fsSub
 	}
 	return nil
-}
-
-func (fst *FSTopic) Delete() {
-	logger.Info("Project:{}:Topic:{}, Deleteing", fst.project.name, fst.name)
-	os.RemoveAll(fst.topicPath)
-	fst.project.DeleteTopic(fst.name)
 }
 
 func (fst *FSTopic) GetTopicFilePath() string {
@@ -165,7 +156,11 @@ func (fst *FSTopic) GetSub(subName string) base.BaseSubscription {
 func (fst *FSTopic) DeleteSub(subName string) {
 	fst.lock.Lock()
 	defer fst.lock.Unlock()
-	delete(fst.subs, subName)
+	if sub, ok := fst.subs[subName]; ok {
+		delete(fst.subs, subName)
+		os.RemoveAll(sub.subPath)
+		logger.Info("Deleted Sub:{} for Topic:{} in Project:{}", subName, fst.name, fst.project.name)
+	}
 }
 
 func (fst *FSTopic) GetAllSubs() []base.BaseSubscription {

@@ -17,6 +17,7 @@ type MemProject struct {
 }
 
 func NewMemProject(name string, memBase *MemBase) *MemProject {
+	logger.Info("Creating Project:{}", name)
 	return &MemProject{
 		memBase: memBase,
 		name:    name,
@@ -40,7 +41,7 @@ func (mp *MemProject) CreateTopic(topic *pubsub.Topic) error {
 	if _, ok := mp.topics[topicName]; ok {
 		return status.Errorf(codes.AlreadyExists, "Topic Already exists")
 	}
-	mp.topics[topicName] = NewMemTopic(mp, topic)
+	mp.topics[topicName] = NewMemTopic(topicName, mp, topic)
 	return nil
 }
 func (mp *MemProject) GetTopic(topicName string) base.BaseTopic {
@@ -54,7 +55,11 @@ func (mp *MemProject) GetTopic(topicName string) base.BaseTopic {
 func (mp *MemProject) DeleteTopic(topicName string) {
 	mp.topicLock.Lock()
 	defer mp.topicLock.Unlock()
-	delete(mp.topics, topicName)
+	if _, ok := mp.topics[topicName]; ok {
+		delete(mp.topics, topicName)
+		logger.Info("Deleted Topic:{} for Project:{}", topicName, mp.name)
+	}
+
 }
 
 func (mp *MemProject) GetAllTopics() map[string]base.BaseTopic {
@@ -76,5 +81,4 @@ func (mp *MemProject) GetAllSubscriptions() map[string]base.BaseSubscription {
 		}
 	}
 	return subs
-
 }
