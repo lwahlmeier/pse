@@ -50,7 +50,7 @@ func CreateFSTopic(topicName string, project *FSProject, topic *pubsub.Topic) (*
 	if err != nil {
 		return nil, err
 	}
-	err = ioutil.WriteFile(tfp, data, os.ModePerm)
+	err = os.WriteFile(tfp, data, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}

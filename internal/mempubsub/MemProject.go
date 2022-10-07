@@ -52,6 +52,7 @@ func (mp *MemProject) GetTopic(topicName string) base.BaseTopic {
 	}
 	return nil
 }
+
 func (mp *MemProject) DeleteTopic(topicName string) {
 	mp.topicLock.Lock()
 	defer mp.topicLock.Unlock()
@@ -59,7 +60,6 @@ func (mp *MemProject) DeleteTopic(topicName string) {
 		delete(mp.topics, topicName)
 		logger.Info("Deleted Topic:{} for Project:{}", topicName, mp.name)
 	}
-
 }
 
 func (mp *MemProject) GetAllTopics() map[string]base.BaseTopic {

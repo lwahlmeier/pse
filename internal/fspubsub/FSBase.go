@@ -18,7 +18,7 @@ type FSBase struct {
 	mapLock  sync.Mutex
 }
 
-func StartFSBase(basePath string) (*FSBase, error) {
+func NewFSBase(basePath string) (*FSBase, error) {
 	logger.Info("Starting FSBase at path:{}", basePath)
 	err := os.MkdirAll(basePath, os.ModePerm)
 	if err != nil {

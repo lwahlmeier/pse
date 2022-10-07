@@ -67,7 +67,7 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 	if err != nil {
 		return nil, err
 	}
-	err = ioutil.WriteFile(sfp, data, os.ModePerm)
+	err = os.WriteFile(sfp, data, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,6 @@ func (fss *FSSubscriptions) watchMessages() {
 			log.Println("error:", err)
 		}
 	}
-
 }
 
 func (fss *FSSubscriptions) GetTopic() base.BaseTopic {

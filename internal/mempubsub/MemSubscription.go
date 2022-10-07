@@ -1,6 +1,7 @@
 package mempubsub
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -97,29 +98,38 @@ func (ms *MemSubscription) AckMessages(acks []string) {
 		ms.runAck(uack)
 	}
 }
+func (ms *MemSubscription) getDefaultAckDeadline() time.Duration {
+	fsecs := float64(ms.sub.AckDeadlineSeconds)
+	fsecs = math.Max(10, fsecs)
+	secs := int(math.Min(600, fsecs))
+	return time.Second * time.Duration(secs)
+}
 
 func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*pubsub.ReceivedMessage {
 	msgs := make([]*pubsub.ReceivedMessage, 0)
 	timer := time.NewTimer(maxWait)
+	ackDelay := ms.getDefaultAckDeadline()
 	select {
 	case msg := <-ms.msgChannel.Get():
 		msgs = append(msgs, msg)
-		ms.watchMesageAck(msg, ms.sub.MessageRetentionDuration.AsDuration())
+		ms.watchMesageAck(msg, ackDelay)
 	loop:
 		for len(msgs) < int(maxMsgs) {
 			select {
 			case msg := <-ms.msgChannel.Get():
 				msgs = append(msgs, msg)
-				ms.watchMesageAck(msg, ms.sub.MessageRetentionDuration.AsDuration())
-			default:
+				ms.watchMesageAck(msg, ackDelay)
+			// We need to wait more then default as there is not constant pressure on these queues
+			case <-time.After(time.Millisecond):
 				break loop
 			}
 		}
+		if !timer.Stop() {
+			<-timer.C
+		}
 	case <-timer.C:
 	}
-	if !timer.Stop() {
-		<-timer.C
-	}
+
 	return msgs
 }
 func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
@@ -136,6 +146,7 @@ func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.Stre
 		running:         true,
 		acker:           utils.NewDynamicUUIDChannel(),
 		pendingMsgs:     make(map[uuid.UUID]bool),
+		recvChan:        make(chan *pubsub.StreamingPullRequest),
 	}
 	ms.clientLock.Lock()
 	defer ms.clientLock.Unlock()
@@ -205,10 +216,7 @@ func (ms *MemSubscription) PublishMessage(msg *pubsub.PubsubMessage) {
 func (ms *MemSubscription) watchMesageAck(msg *pubsub.ReceivedMessage, deadline time.Duration) {
 	ms.ackLock.Lock()
 	defer ms.ackLock.Unlock()
-	ms.acks[uuid.MustParse(msg.AckId)] = &MsgTime{
-		msg:     msg,
-		expTime: time.Now().Add(deadline),
-	}
+	ms.acks[uuid.MustParse(msg.AckId)] = NewMsgTime(msg, deadline)
 }
 
 type StreamingSubcription struct {
@@ -261,7 +269,7 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 				ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 				ss.sub.watchMesageAck(msg, ss.deadline)
 				msgs = append(msgs, msg)
-			default:
+			case <-time.After(time.Millisecond):
 				return msgs
 			}
 		}
@@ -294,6 +302,8 @@ func (ss *StreamingSubcription) noMsgSelect() {
 				ss.sub.UpdateAcks([]string{recvMsg.ModifyDeadlineAckIds[i]}, recvMsg.ModifyDeadlineSeconds[i])
 			}
 		}
+	case <-ss.timer.C:
+		ss.timer.Reset(ack_check_time)
 	}
 }
 
