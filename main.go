@@ -87,7 +87,7 @@ func startPSE(listenAddresses []string, pseType, fspath string) {
 	if pseType == "memory" {
 		backend = mempubsub.NewMemBase()
 	} else if pseType == "filesystem" {
-		backend, err = fspubsub.NewFSBase("/tmp/pubsub2")
+		backend, err = fspubsub.NewFSBase(fspath)
 		if err != nil {
 			logger.Fatal("error starting FileSystem backend {}", err)
 		}
