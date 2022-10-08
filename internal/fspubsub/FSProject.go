@@ -130,6 +130,9 @@ func (pjt *FSProject) DeleteTopic(topicName string) {
 	defer pjt.lock.Unlock()
 	if topic, ok := pjt.topics[topicName]; ok {
 		delete(pjt.topics, topicName)
+		for _, sub := range topic.GetAllSubs() {
+			topic.DeleteSub(sub.GetName())
+		}
 		os.RemoveAll(topic.topicPath)
 		logger.Info("Deleted Topic:{} for Project:{}", topicName, pjt.name)
 	}

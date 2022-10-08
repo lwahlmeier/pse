@@ -56,8 +56,11 @@ func (mp *MemProject) GetTopic(topicName string) base.BaseTopic {
 func (mp *MemProject) DeleteTopic(topicName string) {
 	mp.topicLock.Lock()
 	defer mp.topicLock.Unlock()
-	if _, ok := mp.topics[topicName]; ok {
+	if topic, ok := mp.topics[topicName]; ok {
 		delete(mp.topics, topicName)
+		for _, sub := range topic.GetAllSubs() {
+			topic.DeleteSub(sub.GetName())
+		}
 		logger.Info("Deleted Topic:{} for Project:{}", topicName, mp.name)
 	}
 }

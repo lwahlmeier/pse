@@ -158,7 +158,7 @@ func (fst *FSTopic) DeleteSub(subName string) {
 	defer fst.lock.Unlock()
 	if sub, ok := fst.subs[subName]; ok {
 		delete(fst.subs, subName)
-		os.RemoveAll(sub.subPath)
+		sub.Delete()
 		logger.Info("Deleted Sub:{} for Topic:{} in Project:{}", subName, fst.name, fst.project.name)
 	}
 }

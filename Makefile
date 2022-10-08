@@ -1,9 +1,12 @@
 VERSION ?= 0.0.0-local
 GO_VERSION ?= 1.19
 GO_FILES := $(shell find ./* -iname '*.go')
-GO_RUN := docker run --rm -e GO111MODULE=on -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 -e VERSION=$(VERSION) -e HOME=/tmp -u $(id -u ${USER}):$(id -g ${USER}) -v $$PWD:/build -w /build golang:$(GO_VERSION)
+GO_RUN := docker run --rm -e GO111MODULE=on -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 -e VERSION=$(VERSION) -e HOME=/build/.cache -u $$(id -u $${USER}):$$(id -g $${USER}) -v $$PWD:/build -w /build golang:$(GO_VERSION)
 
 build: build-docker
+
+test:
+	$(GO_RUN) go test -count=1 -cover ./...
 
 build-docker: bin/pse-$(VERSION)
 	docker build --build-arg VERSION=$(VERSION) . -t lwahlmeier/pse:$(VERSION)

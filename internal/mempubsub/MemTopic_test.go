@@ -42,6 +42,7 @@ func TestMemTopicCreateBadSub(t *testing.T) {
 	//Already exists
 	err = memTopic.CreateSub(psSub)
 	assert.Error(t, err)
+	memTopic.project.DeleteTopic(memTopic.name)
 }
 
 func TestMemTopicGetSub(t *testing.T) {
@@ -63,10 +64,11 @@ func TestMemTopicGetSub(t *testing.T) {
 	assert.False(t, ok)
 	//Make sure nothing happens
 	memTopic.DeleteSub(subName)
+	memTopic.project.DeleteTopic(memTopic.name)
 }
 
 func TestMemPublishTest(t *testing.T) {
-	count := 100
+	count := 10
 	subs := make([]string, 0)
 	memTopic, err := GetRandomTopic()
 	assert.NoError(t, err)
@@ -74,7 +76,7 @@ func TestMemPublishTest(t *testing.T) {
 	for i := 0; i < count; i++ {
 		subName := makeString(20)
 		subs = append(subs, subName)
-		psSub := &pubsub.Subscription{Name: fmt.Sprintf("projects/%s/subscriptions/%s", memTopic.project.name, subName)}
+		psSub := &pubsub.Subscription{Name: fmt.Sprintf("projects/%s/subscriptions/%s", memTopic.project.name, subName), AckDeadlineSeconds: 10}
 		err = memTopic.CreateSub(psSub)
 		assert.NoError(t, err)
 	}
@@ -90,8 +92,7 @@ func TestMemPublishTest(t *testing.T) {
 
 	for _, subName := range subs {
 		sub := memTopic.GetSub(subName)
-		msg := sub.GetMessages(3, time.Millisecond)
-
+		msg := sub.GetMessages(2, time.Millisecond*10)
 		sub.AckMessages([]string{msg[0].AckId, msg[1].AckId})
 		assert.Equal(t, msgUUID, msg[0].AckId)
 		assert.Equal(t, data, msg[0].Message.Data)
@@ -105,4 +106,5 @@ func TestMemPublishTest(t *testing.T) {
 		msg := sub.GetMessages(1, time.Millisecond)
 		assert.Equal(t, 0, len(msg))
 	}
+	memTopic.project.DeleteTopic(memTopic.name)
 }

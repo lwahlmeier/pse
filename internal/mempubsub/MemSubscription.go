@@ -2,6 +2,7 @@ package mempubsub
 
 import (
 	"math"
+	"runtime"
 	"sync"
 	"time"
 
@@ -113,19 +114,17 @@ func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*
 	case msg := <-ms.msgChannel.Get():
 		msgs = append(msgs, msg)
 		ms.watchMesageAck(msg, ackDelay)
-	loop:
+		waitTime := time.NewTimer(time.Millisecond * 5)
 		for len(msgs) < int(maxMsgs) {
+			runtime.Gosched()
 			select {
 			case msg := <-ms.msgChannel.Get():
 				msgs = append(msgs, msg)
 				ms.watchMesageAck(msg, ackDelay)
 			// We need to wait more then default as there is not constant pressure on these queues
-			case <-time.After(time.Millisecond):
-				break loop
+			case <-waitTime.C:
+				return msgs
 			}
-		}
-		if !timer.Stop() {
-			<-timer.C
 		}
 	case <-timer.C:
 	}
@@ -161,6 +160,8 @@ func (ms *MemSubscription) DeleteStreamingSubscription(ss *StreamingSubcription)
 	defer ms.clientLock.Unlock()
 	ss.running = false
 	delete(ms.streamClients, ss.clientId)
+	ss.streamingServer.Context().Done()
+	ss.acker.Stop()
 }
 
 func (ms *MemSubscription) stop() {
@@ -170,7 +171,9 @@ func (ms *MemSubscription) stop() {
 	for _, ss := range ms.streamClients {
 		ss.running = false
 		ss.streamingServer.Context().Done()
+		ss.acker.Stop()
 	}
+	ms.msgChannel.Stop()
 }
 
 func (ms *MemSubscription) watcher() {
@@ -263,13 +266,14 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 		ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 		ss.sub.watchMesageAck(msg, ss.deadline)
 		msgs = append(msgs, msg)
-		for len(msgs)+len(ss.pendingMsgs) < int(ss.maxMsgs) {
+		waitTime := time.NewTimer(time.Millisecond)
+		for len(ss.pendingMsgs) < int(ss.maxMsgs) {
 			select {
 			case msg := <-ss.sub.msgChannel.Get():
 				ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 				ss.sub.watchMesageAck(msg, ss.deadline)
 				msgs = append(msgs, msg)
-			case <-time.After(time.Millisecond):
+			case <-waitTime.C:
 				return msgs
 			}
 		}

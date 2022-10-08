@@ -38,7 +38,8 @@ func GetRandomSub() (*FSSubscription, error) {
 	}
 	subName := makeString(20)
 	subps := &pubsub.Subscription{
-		Name: fmt.Sprintf("projects/%s/subscriptions/%s", pjName, subName),
+		Name:               fmt.Sprintf("projects/%s/subscriptions/%s", pjName, subName),
+		AckDeadlineSeconds: 10,
 	}
 	topic := pjt.GetTopic(topicName)
 	err = topic.CreateSub(subps)
@@ -70,7 +71,7 @@ func (tsps *TestingStreamingPullServer) SendHeader(metadata.MD) error {
 }
 func (tsps *TestingStreamingPullServer) SetTrailer(metadata.MD) {}
 func (tsps *TestingStreamingPullServer) Context() context.Context {
-	return nil
+	return context.TODO()
 }
 func (tsps *TestingStreamingPullServer) SendMsg(m interface{}) error {
 	return nil
@@ -121,13 +122,13 @@ func TestBasicManyMessages(t *testing.T) {
 	ack_check_time = time.Millisecond * 5
 	sub, err := GetRandomSub()
 	assert.NoError(t, err)
-	defer os.RemoveAll(sub.topic.project.fsBase.basePath)
+	defer sub.topic.project.DeleteTopic(sub.topic.name)
 	data := []byte("TEST")
 	for i := 0; i < 10; i++ {
 		sub.GetTopic().PublishMessage(&pubsub.PubsubMessage{MessageId: uuid.NewString(), Data: data})
 	}
 	fm := &pubsub.StreamingPullRequest{
-		MaxOutstandingMessages:   10,
+		MaxOutstandingMessages:   15,
 		MaxOutstandingBytes:      1000000000,
 		StreamAckDeadlineSeconds: 10,
 	}

@@ -32,6 +32,7 @@ type FSSubscription struct {
 	streamClients      map[string]*StreamingSubcription
 	clientLock         sync.Mutex
 	msgsChannel        *utils.DynamicUUIDChannel
+	running            bool
 }
 
 func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscription) (*FSSubscription, error) {
@@ -58,6 +59,7 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 		pubsubSubscription: sub,
 		streamClients:      make(map[string]*StreamingSubcription),
 		msgsChannel:        utils.NewDynamicUUIDChannel(),
+		running:            true,
 	}
 
 	sfp := fsSub.GetSubFilePath()
@@ -82,6 +84,7 @@ func LoadSubscription(subName string, topic *FSTopic) (*FSSubscription, error) {
 		subPath:       subPath,
 		streamClients: make(map[string]*StreamingSubcription),
 		msgsChannel:   utils.NewDynamicUUIDChannel(),
+		running:       true,
 	}
 	psSub := &pubsub.Subscription{}
 	fp, err := os.Open(fsSub.GetSubFilePath())
@@ -119,7 +122,7 @@ func LoadSubscription(subName string, topic *FSTopic) (*FSSubscription, error) {
 
 func (fss *FSSubscription) watchAcks() {
 	ackTimer := time.NewTimer(ack_check_time)
-	for {
+	for fss.running {
 		<-ackTimer.C
 		fss.nackMessages()
 		ackTimer.Reset(ack_check_time)
@@ -311,8 +314,16 @@ func (fss *FSSubscription) GetMessages(max int32, maxWait time.Duration) []*pubs
 }
 
 func (fss *FSSubscription) Delete() {
+	fss.running = false
+	fss.clientLock.Lock()
+	defer fss.clientLock.Unlock()
+	for _, ss := range fss.streamClients {
+		ss.running = false
+		ss.streamingServer.Context().Done()
+		ss.acker.Stop()
+	}
+	fss.msgsChannel.Stop()
 	os.RemoveAll(fss.subPath)
-	fss.topic.DeleteSub(fss.name)
 }
 
 func (fss *FSSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
@@ -390,6 +401,7 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 		}
 		ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 		msgs = append(msgs, msg)
+		maxWait := time.NewTimer(time.Millisecond * 5)
 		for len(ss.pendingMsgs) < int(ss.maxMsgs) {
 			runtime.Gosched()
 			select {
@@ -399,7 +411,7 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 					ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
 					msgs = append(msgs, msg)
 				}
-			default:
+			case <-maxWait.C:
 				return msgs
 			}
 		}

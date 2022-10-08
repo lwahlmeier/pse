@@ -29,7 +29,8 @@ func GetRandomSub() (*MemSubscription, error) {
 	}
 	subName := makeString(20)
 	subps := &pubsub.Subscription{
-		Name: fmt.Sprintf("projects/%s/subscriptions/%s", pjName, subName),
+		Name:               fmt.Sprintf("projects/%s/subscriptions/%s", pjName, subName),
+		AckDeadlineSeconds: 10,
 	}
 	topic := pjt.GetTopic(topicName)
 	err = topic.CreateSub(subps)
@@ -61,7 +62,7 @@ func (tsps *TestingStreamingPullServer) SendHeader(metadata.MD) error {
 }
 func (tsps *TestingStreamingPullServer) SetTrailer(metadata.MD) {}
 func (tsps *TestingStreamingPullServer) Context() context.Context {
-	return nil
+	return context.TODO()
 }
 func (tsps *TestingStreamingPullServer) SendMsg(m interface{}) error {
 	return nil
@@ -74,6 +75,7 @@ func TestBasicSubStream(t *testing.T) {
 	ack_check_time = time.Millisecond * 5
 	sub, err := GetRandomSub()
 	assert.NoError(t, err)
+	defer sub.topic.project.DeleteTopic(sub.topic.name)
 	fm := &pubsub.StreamingPullRequest{
 		MaxOutstandingMessages:   1,
 		MaxOutstandingBytes:      1000000000,
@@ -103,10 +105,44 @@ func TestBasicSubStream(t *testing.T) {
 	assert.Equal(t, 0, len(sub.acks))
 }
 
+func TestBasicManyMessages(t *testing.T) {
+	ack_check_time = time.Millisecond * 5
+	sub, err := GetRandomSub()
+	assert.NoError(t, err)
+	defer sub.topic.project.DeleteTopic(sub.topic.name)
+	data := []byte("TEST")
+	for i := 0; i < 10; i++ {
+		sub.GetTopic().PublishMessage(&pubsub.PubsubMessage{MessageId: uuid.NewString(), Data: data})
+	}
+	fm := &pubsub.StreamingPullRequest{
+		MaxOutstandingMessages:   15,
+		MaxOutstandingBytes:      1000000000,
+		StreamAckDeadlineSeconds: 10,
+	}
+	tsps := &TestingStreamingPullServer{
+		sendChannel: make(chan *pubsub.StreamingPullRequest),
+		recvChannel: make(chan *pubsub.StreamingPullResponse),
+	}
+	ss := sub.CreateStreamingSubscription(fm, tsps)
+	go ss.Run()
+	rmsg := <-tsps.recvChannel
+	assert.Equal(t, 10, len(rmsg.ReceivedMessages))
+	assert.Equal(t, data, rmsg.ReceivedMessages[0].Message.Data)
+	assert.Equal(t, 10, len(sub.acks))
+	for _, msg := range rmsg.ReceivedMessages {
+		tsps.sendChannel <- &pubsub.StreamingPullRequest{
+			AckIds: []string{msg.AckId},
+		}
+	}
+	time.Sleep(time.Millisecond * 10)
+	assert.Equal(t, 0, len(sub.acks))
+}
+
 func TestBasicExpireAck(t *testing.T) {
 	ack_check_time = time.Millisecond * 5
 	sub, err := GetRandomSub()
 	assert.NoError(t, err)
+	defer sub.topic.project.DeleteTopic(sub.topic.name)
 	fm := &pubsub.StreamingPullRequest{
 		MaxOutstandingMessages:   1,
 		MaxOutstandingBytes:      1000000000,

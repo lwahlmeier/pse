@@ -1,10 +1,13 @@
 package utils
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +20,12 @@ func TestDynamicUUIDChannel(t *testing.T) {
 	for i := 0; i < count; i++ {
 		duc.Add() <- uuid.New()
 	}
+	et := time.Now().Add(time.Millisecond * 5)
+	for time.Until(et) > 0 && count != <-duc.Count() {
+		runtime.Gosched()
+		fmt.Println(<-duc.Count())
+		fmt.Println(time.Until(et))
+	}
 	assert.Equal(t, count, <-duc.Count())
 	waiter := sync.WaitGroup{}
 	waiter.Add(count)
@@ -24,11 +33,13 @@ func TestDynamicUUIDChannel(t *testing.T) {
 		go func() {
 			for {
 				<-duc.Get()
+				<-duc.Count()
 				waiter.Done()
 			}
 		}()
 	}
 	waiter.Wait()
+	// <-duc.Count()
 	assert.Equal(t, 0, <-duc.Count())
 	count = int(math.Max(400, float64(rand.Intn(1000))))
 	waiter.Add(count)
@@ -36,6 +47,7 @@ func TestDynamicUUIDChannel(t *testing.T) {
 		duc.Add() <- uuid.New()
 	}
 	waiter.Wait()
+	// <-duc.Count()
 	assert.Equal(t, 0, <-duc.Count())
 }
 
@@ -45,6 +57,10 @@ func TestDynamicMsgChannel(t *testing.T) {
 	for i := 0; i < count; i++ {
 		dmc.Add() <- &pubsub.ReceivedMessage{}
 	}
+	et := time.Now().Add(time.Millisecond * 5)
+	for time.Until(et) > 0 && count != <-dmc.Count() {
+		runtime.Gosched()
+	}
 	assert.Equal(t, count, <-dmc.Count())
 	waiter := sync.WaitGroup{}
 	waiter.Add(count)
@@ -52,6 +68,7 @@ func TestDynamicMsgChannel(t *testing.T) {
 		go func() {
 			for {
 				<-dmc.Get()
+				<-dmc.Count()
 				waiter.Done()
 			}
 		}()
