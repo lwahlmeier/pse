@@ -14,7 +14,7 @@ You can start the memory backend with docker w/o providing any additional argume
 
 ```bash
 
-docker run -it --rm -p 8681:8681 lwahlmeier/pse:0.0.1
+docker run -it --rm -p 8681:8681 lwahlmeier/pse:v0.0.1
 
 ```
 
@@ -36,7 +36,7 @@ You must set the backend type and set the location you want to store the data fr
 
 ```bash
 
-docker run -it --rm -p 8681:8681 -e PSE_TYPE=filesystem -e PSE_FSPATH=/pubsub -v /tmp/pubsub2:/pubsub lwahlmeier/pse:0.0.1
+docker run -it --rm -p 8681:8681 -e PSE_TYPE=filesystem -e PSE_FSPATH=/pubsub -v /tmp/pubsub2:/pubsub lwahlmeier/pse:v0.0.1
 
 ```
 

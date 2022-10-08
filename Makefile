@@ -1,4 +1,4 @@
-VERSION ?= 0.0.0-local
+VERSION ?= v0.0.0-local
 GO_VERSION ?= 1.19
 GO_FILES := $(shell find ./* -iname '*.go')
 GO_RUN := docker run --rm -e GO111MODULE=on -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 -e VERSION=$(VERSION) -e HOME=/build/.cache -u $$(id -u $${USER}):$$(id -g $${USER}) -v $$PWD:/build -w /build golang:$(GO_VERSION)
