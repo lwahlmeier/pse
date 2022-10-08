@@ -49,6 +49,9 @@ func main() {
 	cmd.PersistentFlags().String("fspath", "/tmp/pubsub", "The path where we store data when using type filesystem, defaults to /tmp/pubsbu")
 	config.BindPFlag("fspath", cmd.PersistentFlags().Lookup("fspath"))
 
+	cmd.PersistentFlags().Bool("version", false, "get version")
+	config.BindPFlag("version", cmd.PersistentFlags().Lookup("version"))
+
 	cmd.Execute()
 }
 

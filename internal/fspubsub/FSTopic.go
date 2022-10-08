@@ -20,7 +20,7 @@ type FSTopic struct {
 	name        string
 	topicPath   string
 	pubsubTopic *pubsub.Topic
-	subs        map[string]*FSSubscriptions
+	subs        map[string]*FSSubscription
 	lock        sync.Mutex
 }
 
@@ -43,7 +43,7 @@ func CreateFSTopic(topicName string, project *FSProject, topic *pubsub.Topic) (*
 		name:        topicName,
 		topicPath:   basePath,
 		pubsubTopic: topic,
-		subs:        make(map[string]*FSSubscriptions, 0),
+		subs:        make(map[string]*FSSubscription, 0),
 	}
 	tfp := fst.GetTopicFilePath()
 	data, err := proto.Marshal(topic)
@@ -63,7 +63,7 @@ func LoadFSTopic(topicName string, project *FSProject) (*FSTopic, error) {
 		project:   project,
 		name:      topicName,
 		topicPath: basePath,
-		subs:      make(map[string]*FSSubscriptions, 0),
+		subs:      make(map[string]*FSSubscription, 0),
 	}
 	tfp := fst.GetTopicFilePath()
 	fp, err := os.Open(tfp)
@@ -91,7 +91,7 @@ func (fst *FSTopic) loadSubs() error {
 	if err != nil {
 		return err
 	}
-	fsSubs := make([]*FSSubscriptions, 0)
+	fsSubs := make([]*FSSubscription, 0)
 	for _, fsi := range fsil {
 		if !fsi.IsDir() {
 			continue

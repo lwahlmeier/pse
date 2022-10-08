@@ -41,7 +41,7 @@ func TestBasicTopic(t *testing.T) {
 	for _, bs := range BASES {
 		pse := CreateBase(bs)
 		projectName := makeString(30)
-		count := 2
+		count := 10
 		topicNames := make([]string, count)
 
 		topicPubSubs := make([]*pubsub.Topic, count)
