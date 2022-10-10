@@ -107,6 +107,7 @@ func (ms *MemSubscription) getDefaultAckDeadline() time.Duration {
 }
 
 func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*pubsub.ReceivedMessage {
+	logger.Info("Poll Messages from:{}:{}:{}", ms.topic.project.name, ms.topic.name, ms.name)
 	msgs := make([]*pubsub.ReceivedMessage, 0)
 	timer := time.NewTimer(maxWait)
 	ackDelay := ms.getDefaultAckDeadline()
@@ -134,12 +135,16 @@ func (ms *MemSubscription) GetMessages(maxMsgs int32, maxWait time.Duration) []*
 func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
 	cid := uuid.NewString()
 	logger.Info("Project:{}:Topic:{}:Sub:{}, Creating SubStream:{}", ms.topic.project.name, ms.topic.name, ms.name, cid)
+	maxMsg := int64(10)
+	if firstRecvMsg.MaxOutstandingMessages > 0 {
+		maxMsg = firstRecvMsg.MaxOutstandingMessages
+	}
 	ss := &StreamingSubcription{
 		sub:             ms,
 		streamingServer: streamingServer,
 		timer:           time.NewTimer(ack_check_time),
 		clientId:        cid,
-		maxMsgs:         firstRecvMsg.MaxOutstandingMessages,
+		maxMsgs:         maxMsg,
 		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
 		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
 		running:         true,
@@ -209,6 +214,7 @@ func (ms *MemSubscription) runAck(ackUUID uuid.UUID) {
 }
 
 func (ms *MemSubscription) PublishMessage(msg *pubsub.PubsubMessage) {
+	logger.Debug("Project:{}:Topic:{}:Sub:{}, Got Message:{}", ms.topic.project.name, ms.topic.name, ms.name, msg.MessageId)
 	ms.msgChannel.Add() <- &pubsub.ReceivedMessage{
 		Message:         msg,
 		AckId:           msg.MessageId,

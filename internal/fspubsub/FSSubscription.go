@@ -152,6 +152,7 @@ func (fss *FSSubscription) Publish(msg *pubsub.PubsubMessage) {
 	ioutil.WriteFile(tmpPath, data, os.ModePerm)
 	// We Rename to keep from sending notify too soon before we write data
 	os.Rename(tmpPath, msgPath)
+	logger.Debug("Sub:{} New Message mid:{}", fss.name, msg.MessageId)
 	fss.msgsChannel.Add() <- uuid.MustParse(msg.MessageId)
 }
 
@@ -167,6 +168,7 @@ func (fss *FSSubscription) UpdateAcks(ackIds []string, deadline int32) {
 	defer fss.ackLock.Unlock()
 	// We do this here to save multipule locks if we do UpdateAck
 	for _, mid := range ackIds {
+		logger.Debug("Sub:{} Updating add Ack:{} by:{}", fss.name, mid, doTime)
 		msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", mid))
 		_, err := os.Stat(msgPath)
 		if err != nil {
@@ -233,6 +235,7 @@ func (fss *FSSubscription) nackMessages() {
 
 func (fss *FSSubscription) AckMessages(ackIds []string) {
 	for _, ackid := range ackIds {
+		logger.Debug("Sub:{} Acking:{}", fss.name, ackid)
 		ackFile := path.Join(fss.subPath, fmt.Sprintf("%s.ack.proto", ackid))
 		os.RemoveAll(ackFile)
 	}
@@ -329,11 +332,15 @@ func (fss *FSSubscription) Delete() {
 func (fss *FSSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
 	cid := uuid.NewString()
 	logger.Info("Project:{}:Topic:{}:Sub:{}, Creating SubStream:{}", fss.topic.project.name, fss.topic.name, fss.name, cid)
+	maxMsg := int64(10)
+	if firstRecvMsg.MaxOutstandingMessages > 0 {
+		maxMsg = firstRecvMsg.MaxOutstandingMessages
+	}
 	ss := &StreamingSubcription{
 		sub:             fss,
 		streamingServer: streamingServer,
 		clientId:        cid,
-		maxMsgs:         firstRecvMsg.MaxOutstandingMessages,
+		maxMsgs:         maxMsg,
 		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
 		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
 		running:         true,
@@ -399,7 +406,8 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 		if msg == nil {
 			return msgs
 		}
-		ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
+		logger.Debug("Sub:{} Sending mid:{}", ss.sub.name, msg.AckId)
+		ss.pendingMsgs[mid] = true
 		msgs = append(msgs, msg)
 		maxWait := time.NewTimer(time.Millisecond * 5)
 		for len(ss.pendingMsgs) < int(ss.maxMsgs) {
@@ -408,7 +416,8 @@ func (ss *StreamingSubcription) msgSelect() []*pubsub.ReceivedMessage {
 			case mid := <-ss.sub.msgsChannel.Get():
 				msg := ss.sub.getLocalMessages(mid)
 				if msg != nil {
-					ss.pendingMsgs[uuid.MustParse(msg.AckId)] = true
+					ss.pendingMsgs[mid] = true
+					logger.Debug("Sub:{} Sending mid:{}", ss.sub.name, msg.AckId)
 					msgs = append(msgs, msg)
 				}
 			case <-maxWait.C:

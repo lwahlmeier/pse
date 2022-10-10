@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var logger = lcwlog.GetLoggerWithPrefix("PubSubEmulator")
@@ -57,7 +58,9 @@ func (ps *PubSubEmulator) Publish(ctx context.Context, pr *pubsub.PublishRequest
 	}
 	mids := make([]string, 0)
 	for _, msg := range pr.Messages {
-		msg.MessageId = uuid.New().String()
+		msg.PublishTime = timestamppb.Now()
+		msg.MessageId = uuid.NewString()
+		logger.Info("{}:{} Published mid:{}", pjName, topicName, msg.MessageId)
 		err = topic.PublishMessage(msg)
 		if err != nil {
 			logger.Warn("Project:{}, Topic:{} error publishing:{}", pjName, topicName, err.Error())
