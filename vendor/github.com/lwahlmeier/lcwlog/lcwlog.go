@@ -6,11 +6,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/cornelk/hashmap"
 	"github.com/lwahlmeier/pyfmt"
-	"github.com/tevino/abool"
 )
 
 type Logger interface {
@@ -75,16 +74,16 @@ type fullLCWLogger struct {
 	currentLevel Level
 	highestLevel Level
 	dateFMT      string
-	logfiles     hashmap.HashMap
+	logfiles     sync.Map
 	logQueue     chan *logMessage
-	forceFlush   *abool.AtomicBool
+	forceFlush   *atomic.Bool
 	logLevel     bool
 	logTime      bool
 }
 
-var logger *fullLCWLogger
+var logger atomic.Pointer[fullLCWLogger]
 
-var prefixLogger map[string]LCWLogger
+var prefixLogger = sync.Map{}
 
 const traceMsg = "[ TRACE ]"
 const debugMsg = "[ DEBUG ]"
@@ -94,39 +93,44 @@ const infoMsg = "[ INFO  ]"
 const verboseMsg = "[VERBOSE]"
 const dateFMT = "2006-01-02 15:04:05.999"
 
-var LCWLoggerCreateLock sync.Mutex = sync.Mutex{}
-
 func resetLogger() {
-	logger = nil
-	prefixLogger = nil
+	logger.Store(nil)
+	prefixLogger.Range(func(k, v any) bool {
+		prefixLogger.Delete(k)
+		return true
+	})
 }
 
 func GetLoggerConfig() LCWLoggerConfig {
 	GetLogger()
-	return logger
+	return logger.Load()
 }
 
 //GetLogger gets a logger for logging.
-func GetLogger() LCWLogger {
-	if logger == nil {
-		LCWLoggerCreateLock.Lock()
-		defer LCWLoggerCreateLock.Unlock()
-		if logger == nil {
-			logger = &fullLCWLogger{
-				currentLevel: InfoLevel,
-				highestLevel: InfoLevel,
-				dateFMT:      dateFMT,
-				logQueue:     make(chan *logMessage, 1000),
-				logfiles:     hashmap.HashMap{},
-				forceFlush:   abool.NewBool(true),
-				logLevel:     true,
-				logTime:      true,
-			}
-			logger.AddLogFile("STDOUT", defaultLevel)
-			go logger.writeLogQueue()
-		}
+func GetLogger() *fullLCWLogger {
+	ll := logger.Load()
+	if ll != nil {
+		return ll
 	}
-	return logger
+
+	ab := &atomic.Bool{}
+	ab.Store(true)
+	nll := &fullLCWLogger{
+		currentLevel: InfoLevel,
+		highestLevel: InfoLevel,
+		dateFMT:      dateFMT,
+		logQueue:     make(chan *logMessage, 1000),
+		logfiles:     sync.Map{},
+		forceFlush:   ab,
+		logLevel:     true,
+		logTime:      true,
+	}
+	nll.AddLogFile("STDOUT", defaultLevel)
+	if logger.CompareAndSwap(ll, nll) {
+		go nll.writeLogQueue()
+		return nll
+	}
+	return logger.Load()
 }
 
 //GetLoggerWithPrefix gets a logger for logging with a static prefix.
@@ -135,20 +139,14 @@ func GetLoggerWithPrefix(prefix string) LCWLogger {
 	if prefix == "" {
 		return baseLogger
 	}
-	if prefixLogger == nil {
-		LCWLoggerCreateLock.Lock()
-		if prefixLogger == nil {
-			prefixLogger = make(map[string]LCWLogger)
-		}
-		LCWLoggerCreateLock.Unlock()
+	cpl, exists := prefixLogger.Load(prefix)
+	if exists {
+		return cpl.(LCWLogger)
 	}
-	LCWLoggerCreateLock.Lock()
-	defer LCWLoggerCreateLock.Unlock()
-	if sl, ok := prefixLogger[prefix]; ok {
-		return sl
-	}
-	prefixLogger[prefix] = &lcwPrefixLogger{LCWLogger: logger, prefix: prefix}
-	return prefixLogger[prefix]
+	npl := &lcwPrefixLogger{LCWLogger: baseLogger, prefix: prefix}
+
+	cpl, _ = prefixLogger.LoadOrStore(prefix, npl)
+	return cpl.(LCWLogger)
 }
 
 //GetLogLevel gets the current highest set log level for lcwlog
@@ -168,16 +166,17 @@ func (LCWLogger *fullLCWLogger) EnableTimeLogging(b bool) {
 
 //RemoveLogFile removes logging of a file (can be STDOUT/STDERR too)
 func (LCWLogger *fullLCWLogger) RemoveLogFile(file string) {
-	_, ok := LCWLogger.logfiles.Get(file)
+	_, ok := LCWLogger.logfiles.Load(file)
 	if ok {
 		highestLL := defaultLevel
-		LCWLogger.logfiles.Del(file)
-		for kv := range LCWLogger.logfiles.Iter() {
-			lgr := kv.Value.(*logFile)
-			if lgr.logLevel > highestLL {
-				highestLL = lgr.logLevel
+		LCWLogger.logfiles.Delete(file)
+		LCWLogger.logfiles.Range(func(key, v any) bool {
+			lf := v.(*logFile)
+			if lf.logLevel > highestLL {
+				highestLL = lf.logLevel
 			}
-		}
+			return true
+		})
 		if highestLL > defaultLevel {
 			LCWLogger.highestLevel = highestLL
 		}
@@ -206,7 +205,7 @@ func (LCWLogger *fullLCWLogger) AddLogFile(file string, logLevel Level) error {
 	if logLevel > LCWLogger.highestLevel {
 		LCWLogger.highestLevel = logLevel
 	}
-	LCWLogger.logfiles.Set(file, &logFile{path: file, logLevel: logLevel, fp: fp})
+	LCWLogger.logfiles.Store(file, &logFile{path: file, logLevel: logLevel, fp: fp})
 	return nil
 }
 
@@ -214,12 +213,12 @@ func (LCWLogger *fullLCWLogger) writeLogQueue() {
 	syncSoon := time.Duration(100 * time.Millisecond)
 	syncLate := time.Duration(10000 * time.Millisecond)
 	delay := time.NewTimer(syncSoon)
-	if LCWLogger.forceFlush.IsSet() {
+	if LCWLogger.forceFlush.Load() {
 		delay.Reset(syncLate)
 	}
 	defer delay.Stop()
 	for {
-		if LCWLogger.forceFlush.IsSet() {
+		if LCWLogger.forceFlush.Load() {
 			delay.Reset(syncLate)
 		} else {
 			delay.Reset(syncSoon)
@@ -231,10 +230,11 @@ func (LCWLogger *fullLCWLogger) writeLogQueue() {
 				lm.wg.Done()
 			}
 		case <-delay.C:
-			for kv := range LCWLogger.logfiles.Iter() {
-				lgr := kv.Value.(*logFile)
-				lgr.fp.Sync()
-			}
+			LCWLogger.logfiles.Range(func(key, v any) bool {
+				lf := v.(*logFile)
+				lf.fp.Sync()
+				return true
+			})
 		}
 	}
 }
@@ -270,15 +270,16 @@ func (LCWLogger *fullLCWLogger) formatLogMessage(lm *logMessage) string {
 }
 
 func (LCWLogger *fullLCWLogger) writeLogs(logLevel Level, sync bool, msg string) {
-	for kv := range LCWLogger.logfiles.Iter() {
-		lgr := kv.Value.(*logFile)
+	LCWLogger.logfiles.Range(func(k, v any) bool {
+		lgr := v.(*logFile)
 		if lgr.logLevel >= logLevel || (lgr.logLevel == defaultLevel && LCWLogger.currentLevel >= logLevel) {
 			lgr.fp.WriteString(msg)
-			if LCWLogger.forceFlush.IsSet() || sync {
+			if LCWLogger.forceFlush.Load() || sync {
 				lgr.fp.Sync()
 			}
 		}
-	}
+		return true
+	})
 }
 
 func (LCWLogger *fullLCWLogger) wrapMessage(ll Level, wg *sync.WaitGroup, args ...interface{}) *logMessage {
@@ -309,7 +310,7 @@ func (LCWLogger *fullLCWLogger) Flush() {
 
 //ForceFlush enables/disables forcing sync on logfiles after every write
 func (LCWLogger *fullLCWLogger) ForceFlush(ff bool) {
-	LCWLogger.forceFlush.SetTo(ff)
+	LCWLogger.forceFlush.Store(ff)
 	if ff {
 		LCWLogger.Flush()
 	}
@@ -331,12 +332,13 @@ func (LCWLogger *fullLCWLogger) SetLogger(givenLogger Logger) {
 func (LCWLogger *fullLCWLogger) SetLevel(level Level) {
 	LCWLogger.currentLevel = level
 	hl := level
-	for kv := range LCWLogger.logfiles.Iter() {
-		lgr := kv.Value.(*logFile)
+	LCWLogger.logfiles.Range(func(k, v any) bool {
+		lgr := v.(*logFile)
 		if lgr.logLevel > hl {
 			hl = lgr.logLevel
 		}
-	}
+		return true
+	})
 	LCWLogger.highestLevel = hl
 }
 
@@ -344,7 +346,7 @@ func (LCWLogger *fullLCWLogger) SetLevel(level Level) {
 func (LCWLogger *fullLCWLogger) Debug(message ...interface{}) {
 	if LCWLogger.highestLevel >= DebugLevel {
 		if LCWLogger.setLogger == nil {
-			if LCWLogger.forceFlush.IsSet() {
+			if LCWLogger.forceFlush.Load() {
 				wg := &sync.WaitGroup{}
 				wg.Add(1)
 				LCWLogger.logQueue <- LCWLogger.wrapMessage(DebugLevel, wg, message...)
@@ -362,7 +364,7 @@ func (LCWLogger *fullLCWLogger) Debug(message ...interface{}) {
 func (LCWLogger *fullLCWLogger) Verbose(message ...interface{}) {
 	if LCWLogger.highestLevel >= VerboseLevel {
 		if LCWLogger.setLogger == nil {
-			if LCWLogger.forceFlush.IsSet() {
+			if LCWLogger.forceFlush.Load() {
 				wg := &sync.WaitGroup{}
 				wg.Add(1)
 				LCWLogger.logQueue <- LCWLogger.wrapMessage(VerboseLevel, wg, message...)
@@ -380,7 +382,7 @@ func (LCWLogger *fullLCWLogger) Verbose(message ...interface{}) {
 func (LCWLogger *fullLCWLogger) Warn(message ...interface{}) {
 	if LCWLogger.highestLevel >= WarnLevel {
 		if LCWLogger.setLogger == nil {
-			if LCWLogger.forceFlush.IsSet() {
+			if LCWLogger.forceFlush.Load() {
 				wg := &sync.WaitGroup{}
 				wg.Add(1)
 				LCWLogger.logQueue <- LCWLogger.wrapMessage(WarnLevel, wg, message...)
@@ -398,7 +400,7 @@ func (LCWLogger *fullLCWLogger) Warn(message ...interface{}) {
 func (LCWLogger *fullLCWLogger) Trace(message ...interface{}) {
 	if LCWLogger.highestLevel >= TraceLevel {
 		if LCWLogger.setLogger == nil {
-			if LCWLogger.forceFlush.IsSet() {
+			if LCWLogger.forceFlush.Load() {
 				wg := &sync.WaitGroup{}
 				wg.Add(1)
 				LCWLogger.logQueue <- LCWLogger.wrapMessage(TraceLevel, wg, message...)
@@ -417,7 +419,7 @@ func (LCWLogger *fullLCWLogger) Info(message ...interface{}) {
 	if LCWLogger.highestLevel >= InfoLevel {
 		if LCWLogger.setLogger == nil {
 
-			if LCWLogger.forceFlush.IsSet() {
+			if LCWLogger.forceFlush.Load() {
 				wg := &sync.WaitGroup{}
 				wg.Add(1)
 				LCWLogger.logQueue <- LCWLogger.wrapMessage(InfoLevel, wg, message...)

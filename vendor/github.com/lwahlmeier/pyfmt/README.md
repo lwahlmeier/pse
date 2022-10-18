@@ -1,5 +1,5 @@
 # pyfmt
-[![Build Status](https://travis-ci.org/slongfield/pyfmt.svg?branch=master)](https://travis-ci.org/slongfield/pyfmt)
+![Build Status](https://github.com/slongfield/pyfmt/actions/workflows/go.yml/badge.svg)
 
 pyfmt implements Python's advanced string formatting in Golang.
 
@@ -16,7 +16,7 @@ literal '{' and '}' runes to be emitted in the output.
 Each format item consists of a 'field name', which indicates which value from the argument list to
 use, and a 'format specifier', which indicates how to format that item.
 
-Requires Golang 1.5 or newer.
+Requires Golang 1.5 or newer for formatting, 1.9 or newer to run the tests.
 
 # Functions
 
@@ -36,7 +36,7 @@ names build off of simple names.
 
 The simplest look up treats the argument list as just a list. There are two possible ways to look up
 elements from this list. First, by {}, which gets the 'next' item and by {n}, which gets the nth
-item. Accessing these two ways is independent, and
+item. Accessing these two ways is independent but cannot be mixed, and
 
 ```
   pyfmt.Must("{} {} {}", ...)

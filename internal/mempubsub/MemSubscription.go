@@ -1,14 +1,17 @@
 package mempubsub
 
 import (
+	"context"
 	"math"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/utils"
 	"github.com/google/uuid"
+	"github.com/lwahlmeier/GoScheduler"
+	unboundchannel "github.com/lwahlmeier/unboundChannel"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
 )
 
@@ -40,10 +43,11 @@ type MemSubscription struct {
 	sub           *pubsub.Subscription
 	acks          map[uuid.UUID]*MsgTime
 	ackLock       sync.Mutex
-	msgChannel    *utils.DynamicMsgChannel
-	running       bool
+	msgChannel    *unboundchannel.UnboundChannel[*pubsub.ReceivedMessage]
+	running       atomic.Bool
 	streamClients map[string]*StreamingSubcription
 	clientLock    sync.Mutex
+	cf            context.CancelFunc
 }
 
 func NewMemSub(name string, topic *MemTopic, sub *pubsub.Subscription) *MemSubscription {
@@ -51,12 +55,15 @@ func NewMemSub(name string, topic *MemTopic, sub *pubsub.Subscription) *MemSubsc
 		name:          name,
 		topic:         topic,
 		sub:           sub,
-		msgChannel:    utils.NewDynamicMsgChannel(),
+		msgChannel:    unboundchannel.NewUnboundChannel[*pubsub.ReceivedMessage](),
 		acks:          make(map[uuid.UUID]*MsgTime),
 		streamClients: make(map[string]*StreamingSubcription),
-		running:       true,
+		running:       atomic.Bool{},
 	}
-	go ms.watcher()
+	ms.running.Store(true)
+	ctx, cf := context.WithCancel(context.Background())
+	ms.cf = cf
+	GoScheduler.GetDefaultScheduler().ScheduleWithContext(ack_check_time, true, ms.checkNack, ctx)
 	logger.Info("Created Sub:{} for Topic:{} and Project:{}", name, topic.name, topic.project.name)
 	return ms
 }
@@ -71,6 +78,9 @@ func (ms *MemSubscription) GetSubscriptionPubSub() *pubsub.Subscription {
 	return ms.sub
 }
 func (ms *MemSubscription) UpdateAcks(acks []string, secs int32) {
+	if !ms.running.Load() {
+		return
+	}
 	ms.ackLock.Lock()
 	defer ms.ackLock.Unlock()
 	addTime := time.Second * time.Duration(secs)
@@ -82,6 +92,9 @@ func (ms *MemSubscription) UpdateAcks(acks []string, secs int32) {
 	}
 }
 func (ms *MemSubscription) UpdateAck(ack string, addTime time.Duration) {
+	if !ms.running.Load() {
+		return
+	}
 	ms.ackLock.Lock()
 	defer ms.ackLock.Unlock()
 	uack := uuid.MustParse(ack)
@@ -91,6 +104,9 @@ func (ms *MemSubscription) UpdateAck(ack string, addTime time.Duration) {
 }
 
 func (ms *MemSubscription) AckMessages(acks []string) {
+	if !ms.running.Load() {
+		return
+	}
 	ms.ackLock.Lock()
 	defer ms.ackLock.Unlock()
 	for _, ack := range acks {
@@ -148,7 +164,7 @@ func (ms *MemSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.Stre
 		maxBytes:        firstRecvMsg.MaxOutstandingBytes,
 		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
 		running:         true,
-		acker:           utils.NewDynamicUUIDChannel(),
+		acker:           unboundchannel.NewUnboundChannel[uuid.UUID](),
 		pendingMsgs:     make(map[uuid.UUID]bool),
 		recvChan:        make(chan *pubsub.StreamingPullRequest),
 	}
@@ -170,23 +186,16 @@ func (ms *MemSubscription) DeleteStreamingSubscription(ss *StreamingSubcription)
 }
 
 func (ms *MemSubscription) stop() {
-	ms.running = false
-	ms.clientLock.Lock()
-	defer ms.clientLock.Unlock()
-	for _, ss := range ms.streamClients {
-		ss.running = false
-		ss.streamingServer.Context().Done()
-		ss.acker.Stop()
-	}
-	ms.msgChannel.Stop()
-}
-
-func (ms *MemSubscription) watcher() {
-	timer := time.NewTimer(ack_check_time)
-	for ms.running {
-		<-timer.C
-		ms.checkNack()
-		timer.Reset(ack_check_time)
+	if ms.running.CompareAndSwap(true, false) {
+		ms.cf()
+		ms.clientLock.Lock()
+		defer ms.clientLock.Unlock()
+		for _, ss := range ms.streamClients {
+			ss.running = false
+			ss.streamingServer.Context().Done()
+			ss.acker.Stop()
+		}
+		ms.msgChannel.Stop()
 	}
 }
 
@@ -235,7 +244,7 @@ type StreamingSubcription struct {
 	maxMsgs         int64
 	maxBytes        int64
 	pendingMsgs     map[uuid.UUID]bool
-	acker           *utils.DynamicUUIDChannel
+	acker           *unboundchannel.UnboundChannel[uuid.UUID]
 	currentBytes    int64
 	clientId        string
 	deadline        time.Duration

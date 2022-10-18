@@ -1,6 +1,7 @@
 package fspubsub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -9,11 +10,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"githb.com/lwahlmeier/go-pubsub-emulator/internal/base"
-	"githb.com/lwahlmeier/go-pubsub-emulator/internal/utils"
 	"github.com/google/uuid"
+	"github.com/lwahlmeier/GoScheduler"
+	unboundchannel "github.com/lwahlmeier/unboundChannel"
 	"google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,8 +34,9 @@ type FSSubscription struct {
 	ackLock            sync.Mutex
 	streamClients      map[string]*StreamingSubcription
 	clientLock         sync.Mutex
-	msgsChannel        *utils.DynamicUUIDChannel
-	running            bool
+	msgsChannel        *unboundchannel.UnboundChannel[uuid.UUID]
+	running            atomic.Bool
+	cf                 context.CancelFunc
 }
 
 func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscription) (*FSSubscription, error) {
@@ -58,9 +62,10 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 		subPath:            subPath,
 		pubsubSubscription: sub,
 		streamClients:      make(map[string]*StreamingSubcription),
-		msgsChannel:        utils.NewDynamicUUIDChannel(),
-		running:            true,
+		msgsChannel:        unboundchannel.NewUnboundChannel[uuid.UUID](),
+		running:            atomic.Bool{},
 	}
+	fsSub.running.Store(true)
 
 	sfp := fsSub.GetSubFilePath()
 	data, err := proto.Marshal(sub)
@@ -72,7 +77,9 @@ func CreateSubscription(basePath string, topic *FSTopic, sub *pubsub.Subscriptio
 		return nil, err
 	}
 	logger.Info("Created Sub:{} for Topic:{} in Project:{}", subName, topic.name, topic.project.name)
-	go fsSub.watchAcks()
+	ctx, cf := context.WithCancel(context.Background())
+	fsSub.cf = cf
+	GoScheduler.GetDefaultScheduler().ScheduleWithContext(ack_check_time, true, fsSub.nackMessages, ctx)
 	return fsSub, nil
 }
 
@@ -83,9 +90,10 @@ func LoadSubscription(subName string, topic *FSTopic) (*FSSubscription, error) {
 		topic:         topic,
 		subPath:       subPath,
 		streamClients: make(map[string]*StreamingSubcription),
-		msgsChannel:   utils.NewDynamicUUIDChannel(),
-		running:       true,
+		msgsChannel:   unboundchannel.NewUnboundChannel[uuid.UUID](),
+		running:       atomic.Bool{},
 	}
+	fsSub.running.Store(true)
 	psSub := &pubsub.Subscription{}
 	fp, err := os.Open(fsSub.GetSubFilePath())
 	if err != nil {
@@ -116,17 +124,10 @@ func LoadSubscription(subName string, topic *FSTopic) (*FSSubscription, error) {
 		fsSub.msgsChannel.Add() <- mid
 	}
 	logger.Info("Loaded Sub:{} for Topic:{} in Project:{}", subName, topic.name, topic.project.name)
-	go fsSub.watchAcks()
+	ctx, cf := context.WithCancel(context.Background())
+	fsSub.cf = cf
+	GoScheduler.GetDefaultScheduler().ScheduleWithContext(ack_check_time, true, fsSub.nackMessages, ctx)
 	return fsSub, nil
-}
-
-func (fss *FSSubscription) watchAcks() {
-	ackTimer := time.NewTimer(ack_check_time)
-	for fss.running {
-		<-ackTimer.C
-		fss.nackMessages()
-		ackTimer.Reset(ack_check_time)
-	}
 }
 
 func (fss *FSSubscription) GetTopic() base.BaseTopic {
@@ -146,6 +147,9 @@ func (fss *FSSubscription) GetSubscriptionPubSub() *pubsub.Subscription {
 }
 
 func (fss *FSSubscription) Publish(msg *pubsub.PubsubMessage) {
+	if !fss.running.Load() {
+		return
+	}
 	data, _ := proto.Marshal(msg)
 	tmpPath := path.Join(fss.subPath, fmt.Sprintf("%s.tmp-msg.proto", msg.MessageId))
 	msgPath := path.Join(fss.subPath, fmt.Sprintf("%s.msg.proto", msg.MessageId))
@@ -157,6 +161,9 @@ func (fss *FSSubscription) Publish(msg *pubsub.PubsubMessage) {
 }
 
 func (fss *FSSubscription) UpdateAcks(ackIds []string, deadline int32) {
+	if !fss.running.Load() {
+		return
+	}
 	doTime := time.Second * time.Duration(deadline)
 	if doTime < time.Second {
 		doTime = time.Duration(0)
@@ -179,6 +186,9 @@ func (fss *FSSubscription) UpdateAcks(ackIds []string, deadline int32) {
 }
 
 func (fss *FSSubscription) UpdateAck(ackId string, addTime time.Duration) {
+	if !fss.running.Load() {
+		return
+	}
 	doTime := addTime
 	if addTime < time.Second {
 		doTime = time.Duration(0)
@@ -194,10 +204,13 @@ func (fss *FSSubscription) UpdateAck(ackId string, addTime time.Duration) {
 		return
 	}
 	os.Chtimes(msgPath, ackTill, ackTill)
-
 }
 
 func (fss *FSSubscription) nackMessages() {
+	fmt.Println("NACK")
+	if !fss.running.Load() {
+		return
+	}
 	fss.ackLock.Lock()
 	defer fss.ackLock.Unlock()
 	nacks := make([]uuid.UUID, 0)
@@ -317,16 +330,18 @@ func (fss *FSSubscription) GetMessages(max int32, maxWait time.Duration) []*pubs
 }
 
 func (fss *FSSubscription) Delete() {
-	fss.running = false
-	fss.clientLock.Lock()
-	defer fss.clientLock.Unlock()
-	for _, ss := range fss.streamClients {
-		ss.running = false
-		ss.streamingServer.Context().Done()
-		ss.acker.Stop()
+	if fss.running.CompareAndSwap(true, false) {
+		fss.clientLock.Lock()
+		defer fss.clientLock.Unlock()
+		fss.cf()
+		for _, ss := range fss.streamClients {
+			ss.running = false
+			ss.streamingServer.Context().Done()
+			ss.acker.Stop()
+		}
+		fss.msgsChannel.Stop()
+		os.RemoveAll(fss.subPath)
 	}
-	fss.msgsChannel.Stop()
-	os.RemoveAll(fss.subPath)
 }
 
 func (fss *FSSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.StreamingPullRequest, streamingServer pubsub.Subscriber_StreamingPullServer) base.BaseStreamingSubcription {
@@ -345,7 +360,7 @@ func (fss *FSSubscription) CreateStreamingSubscription(firstRecvMsg *pubsub.Stre
 		deadline:        time.Second * time.Duration(firstRecvMsg.StreamAckDeadlineSeconds),
 		running:         true,
 		pendingMsgs:     make(map[uuid.UUID]bool),
-		acker:           utils.NewDynamicUUIDChannel(),
+		acker:           unboundchannel.NewUnboundChannel[uuid.UUID](),
 		recvChan:        make(chan *pubsub.StreamingPullRequest),
 	}
 	fss.clientLock.Lock()
@@ -372,7 +387,7 @@ type StreamingSubcription struct {
 	clientId        string
 	deadline        time.Duration
 	recvChan        chan *pubsub.StreamingPullRequest
-	acker           *utils.DynamicUUIDChannel
+	acker           *unboundchannel.UnboundChannel[uuid.UUID]
 	running         bool
 }
 

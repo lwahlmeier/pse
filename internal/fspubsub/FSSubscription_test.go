@@ -183,17 +183,20 @@ func TestBasicExpireAck(t *testing.T) {
 	go ss.Run()
 	msgUUID := uuid.NewString()
 	data := []byte("TEST")
+	fmt.Println("Publish")
 	sub.GetTopic().PublishMessage(&pubsub.PubsubMessage{MessageId: msgUUID, Data: data})
-
 	rmsg := <-tsps.recvChannel
+
 	assert.Equal(t, 1, len(rmsg.ReceivedMessages))
 	assert.Equal(t, data, rmsg.ReceivedMessages[0].Message.Data)
 	tsps.sendChannel <- &pubsub.StreamingPullRequest{
 		ModifyDeadlineSeconds: []int32{0},
 		ModifyDeadlineAckIds:  []string{msgUUID},
 	}
+	fmt.Println("Publish2")
 	time.Sleep(ack_check_time * 2)
 	rmsg = <-tsps.recvChannel
+	fmt.Println("Publish3")
 	assert.Equal(t, 1, len(rmsg.ReceivedMessages))
 	assert.Equal(t, data, rmsg.ReceivedMessages[0].Message.Data)
 	tsps.sendChannel <- &pubsub.StreamingPullRequest{
